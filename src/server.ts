@@ -347,6 +347,42 @@ export function createServer(
     });
   });
 
+  app.post("/admin/api-keys/:id/enable", (req, res) => {
+    const id = req.params.id;
+    try {
+      const updated = apiKeyRegistry.updateKeyState(id, true);
+      res.json({
+        key: updated.record,
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      if (message.startsWith("API key not found:")) {
+        res.status(404).json({ error: { message } });
+        return;
+      }
+      res.status(400).json({ error: { message } });
+    }
+  });
+
+  app.post("/admin/api-keys/:id/disable", (req, res) => {
+    const id = req.params.id;
+    try {
+      const updated = apiKeyRegistry.updateKeyState(id, false);
+      res.json({
+        key: updated.record,
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      if (message.startsWith("API key not found:")) {
+        res.status(404).json({ error: { message } });
+        return;
+      }
+      res.status(400).json({ error: { message } });
+    }
+  });
+
   // POST /admin/reload — re-reads token files from auth-dir and reconciles
   // each provider's in-memory state. Called automatically by `--login` after
   // a successful re-auth (see notifyServerReload in src/index.ts), and

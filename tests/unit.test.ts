@@ -27,6 +27,7 @@ import {
   resolveAuthDir,
 } from "../src/config";
 import { AccountManager, UsageData } from "../src/accounts/manager";
+import { ApiKeyRegistry } from "../src/auth/api-key-registry";
 import { buildSessionBindingKey } from "../src/routing/session";
 import { parseRoutingExtraArg } from "../src/auth/routing-extra";
 
@@ -542,6 +543,59 @@ test("ApiKeyRegistry keeps bootstrap admin record even when another admin alread
       1,
     );
     assert.equal(registry.getAdminSecret(), "sk-existing-admin");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("ApiKeyRegistry supports enabling and disabling non-admin keys", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    const created = registry.createKey({
+      tier: "lite",
+      name: "client",
+      enabled: false,
+    });
+    assert.equal(created.record.enabled, false);
+    assert.equal(registry.authenticate(created.secret), null);
+
+    const disabled = registry.updateKeyState(created.record.id, true);
+    assert.equal(disabled.record.enabled, true);
+    assert.ok(registry.authenticate(created.secret));
+
+    const disabledAgain = registry.updateKeyState(created.record.id, false);
+    assert.equal(disabledAgain.record.enabled, false);
+    assert.equal(registry.authenticate(created.secret), null);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("ApiKeyRegistry rejects disabling the admin key", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+    const admin = registry.list().find((k) => k.tier === "admin" && k.enabled);
+    assert.ok(admin);
+    assert.throws(() => registry.updateKeyState(admin!.id, false), /cannot be disabled/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -334,6 +334,28 @@ Response shape (one entry per logged-in provider):
 
 Each account snapshot carries availability, cooldown, failure counters, last refresh time, request statistics, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. When codex smart routing is enabled, snapshots also expose routing metadata (`resetAt`, `lastQuotaSyncAt`, `lastActiveAt`, `confidence`, `windowType`, `resetPeriodMs`) used for provider-local strategy routing. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
 
+### API key management
+
+`/admin/api-keys` supports list, create, enable, and disable operations. The `id` field returned by `GET /admin/api-keys` is the identifier used by the enable/disable actions.
+
+```bash
+curl http://127.0.0.1:8317/admin/api-keys \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys \
+  -H "Authorization: Bearer <bootstrap-admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"tier":"lite","name":"my-lite-key","enabled":true}'
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/enable \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/disable \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+```
+
+`admin` keys cannot be disabled; create a different admin key first if you need to rotate the active one.
+
 ### Re-authenticating without restart
 
 Running `--login` while the server is up writes a new token file and **automatically notifies the running server** (via `POST /admin/reload`) so the new token takes effect immediately — no restart needed. This is especially important for the codex provider: OpenAI rotates the refresh token on every refresh, so leaving the server running with a stale refresh token while you re-auth would otherwise put the account into a `refresh_token_reused` terminal cooldown.

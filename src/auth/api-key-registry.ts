@@ -101,22 +101,8 @@ export class ApiKeyRegistry {
       changed = true;
     }
 
-    const adminRecords = file.keys.filter((k) => k.tier === "admin" && k.enabled);
-    if (adminRecords.length > 1) {
-      const [first, ...rest] = adminRecords;
-      for (const rec of rest) {
-        rec.enabled = false;
-        rec.updatedAt = nowIso();
-      }
-      changed = true;
-      this.adminSecret = first.secret;
-    } else if (adminRecords.length === 1) {
-      this.adminSecret = adminRecords[0].secret;
-    } else {
-      this.adminSecret = null;
-    }
-
     this.keys = file.keys;
+    changed = this.reconcileAdminState(this.keys) || changed;
     this.rebuildIndex();
     if (changed || !fs.existsSync(this.filePath)) {
       this.writeFile();
@@ -213,8 +199,62 @@ export class ApiKeyRegistry {
       this.keys.push(record);
     }
 
+    this.reconcileAdminState(this.keys);
     this.rebuildIndex();
     this.writeFile();
     return { record: { ...record }, secret };
+  }
+
+  updateKeyState(
+    id: string,
+    enabled: boolean,
+  ): { record: ApiKeyRecord; changed: boolean } {
+    const record = this.keys.find((rec) => rec.id === id);
+    if (!record) {
+      throw new Error(`API key not found: ${id}`);
+    }
+
+    if (record.tier === "admin" && enabled === false) {
+      throw new Error("Admin key cannot be disabled");
+    }
+
+    if (record.enabled === enabled) {
+      return { record: { ...record }, changed: false };
+    }
+
+    record.enabled = enabled;
+    record.updatedAt = nowIso();
+    if (record.tier === "admin" && enabled) {
+      for (const rec of this.keys) {
+        if (rec.id !== record.id && rec.tier === "admin" && rec.enabled) {
+          rec.enabled = false;
+          rec.updatedAt = nowIso();
+        }
+      }
+    }
+
+    this.reconcileAdminState(this.keys);
+    this.rebuildIndex();
+    this.writeFile();
+    return { record: { ...record }, changed: true };
+  }
+
+  private reconcileAdminState(records: ApiKeyRecord[] = this.keys): boolean {
+    const adminRecords = records.filter((k) => k.tier === "admin" && k.enabled);
+    if (adminRecords.length > 1) {
+      const [first, ...rest] = adminRecords;
+      for (const rec of rest) {
+        rec.enabled = false;
+        rec.updatedAt = nowIso();
+      }
+      this.adminSecret = first.secret;
+      return true;
+    }
+    if (adminRecords.length === 1) {
+      this.adminSecret = adminRecords[0].secret;
+      return false;
+    }
+    this.adminSecret = null;
+    return false;
   }
 }

@@ -333,6 +333,28 @@ curl http://127.0.0.1:8317/admin/accounts \
 
 每个账号 snapshot 包含:可用状态、cooldown 截止时间、失败计数、最近刷新时间、请求统计、按账号聚合的 token 用量(其中 `totalReasoningOutputTokens` 是 reasoning 模型如 `gpt-5.5` 隐藏推理消耗的 token,不计入可见输出)。Codex 账号还会带 `planType`(从 OAuth `id_token` 提取的 `"plus"`/`"pro"`/`"free"` 等)。启用 codex 智能路由时,快照里还会额外暴露路由 metadata(`resetAt`、`lastQuotaSyncAt`、`lastActiveAt`、`confidence`、`windowType`、`resetPeriodMs`) 供排查策略路由使用。如果 refresh token 被永久作废(`refresh_token_reused`/`expired`/`invalidated`),账号会进入 24 小时终态冷却,`lastError` 中会提示需要重新执行 `--login --provider=<provider>`。
 
+### API key 管理
+
+`/admin/api-keys` 支持列表、创建、启用、禁用 4 个动作。`GET /admin/api-keys` 返回的 `id` 就是启用/禁用接口使用的标识。
+
+```bash
+curl http://127.0.0.1:8317/admin/api-keys \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys \
+  -H "Authorization: Bearer <bootstrap-admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"tier":"lite","name":"my-lite-key","enabled":true}'
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/enable \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+
+curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/disable \
+  -H "Authorization: Bearer <bootstrap-admin-key>"
+```
+
+`admin` key 不允许直接禁用；如果要切换 active admin，先创建新的 admin key。
+
 ### 在不停机的情况下重新登录
 
 服务运行中跑 `--login` 会写入新 token 文件并**自动通知运行中的服务**(POST `/admin/reload`),新 token 立刻生效,不必重启。对 codex provider 尤其重要:OpenAI 每次刷新都会轮转 refresh token,如果不重载,运行中的服务还在用旧的 refresh token,刷新会被后端识别为 `refresh_token_reused`,导致账号进入终态冷却。
