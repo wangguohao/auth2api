@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import fs from "fs";
+import { promises as fsp } from "fs";
 import path from "path";
 import { generateApiKey } from "../config";
 import { ApiKeyFile, ApiKeyRecord, ApiKeyTier } from "./types";
@@ -19,6 +20,7 @@ export interface ApiKeyRegistryOptions {
   bootstrapAdminKey?: string;
   seededKeys?: string[];
   tierLimits: ApiKeyTierLimits;
+  flushDebounceMs?: number;
 }
 
 const FILE_NAME = "api-keys.json";
@@ -43,7 +45,11 @@ function isKeyRecord(value: unknown): value is ApiKeyRecord {
 function isFile(value: unknown): value is ApiKeyFile {
   if (!value || typeof value !== "object") return false;
   const file = value as ApiKeyFile;
-  return file.version === 1 && Array.isArray(file.keys) && file.keys.every(isKeyRecord);
+  return (
+    file.version === 1 &&
+    Array.isArray(file.keys) &&
+    file.keys.every(isKeyRecord)
+  );
 }
 
 function defaultNameForTier(tier: ApiKeyTier): string {
@@ -62,12 +68,17 @@ export class ApiKeyRegistry {
   private keys: ApiKeyRecord[] = [];
   private secretIndex: Map<string, ApiKeyRecord> = new Map();
   private adminSecret: string | null = null;
+  private flushDebounceMs: number;
+  private flushTimer: NodeJS.Timeout | null = null;
+  private flushPromise: Promise<void> | null = null;
+  private flushAgain = false;
 
   constructor(authDir: string, opts: ApiKeyRegistryOptions) {
     this.filePath = path.join(authDir, FILE_NAME);
     this.bootstrapAdminKey = opts.bootstrapAdminKey;
     this.seededKeys = opts.seededKeys ?? [];
     this.tierLimits = opts.tierLimits;
+    this.flushDebounceMs = opts.flushDebounceMs ?? 250;
   }
 
   load(): void {
@@ -96,8 +107,13 @@ export class ApiKeyRegistry {
 
     for (const secret of this.seededKeys) {
       if (file.keys.some((k) => k.secret === secret)) continue;
-      const tier = this.bootstrapAdminKey && secret === this.bootstrapAdminKey ? "admin" : "lite";
-      file.keys.push(this.makeRecord(secret, tier, defaultNameForTier(tier), true));
+      const tier =
+        this.bootstrapAdminKey && secret === this.bootstrapAdminKey
+          ? "admin"
+          : "lite";
+      file.keys.push(
+        this.makeRecord(secret, tier, defaultNameForTier(tier), true),
+      );
       changed = true;
     }
 
@@ -109,7 +125,8 @@ export class ApiKeyRegistry {
     }
   }
 
-  reload(): void {
+  async reload(): Promise<void> {
+    await this.flushPending();
     this.load();
   }
 
@@ -118,7 +135,9 @@ export class ApiKeyRegistry {
       return { version: 1, keys: [] };
     }
     try {
-      const raw = JSON.parse(fs.readFileSync(this.filePath, "utf-8")) as unknown;
+      const raw = JSON.parse(
+        fs.readFileSync(this.filePath, "utf-8"),
+      ) as unknown;
       if (isFile(raw)) return raw;
     } catch {}
     return { version: 1, keys: [] };
@@ -131,6 +150,58 @@ export class ApiKeyRegistry {
       JSON.stringify({ version: 1, keys: this.keys }, null, 2),
       { mode: 0o600 },
     );
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushToDisk().catch((err) => {
+        console.error(
+          `[api-keys] failed to flush ${path.basename(this.filePath)}: ${err?.message || String(err)}`,
+        );
+      });
+    }, this.flushDebounceMs);
+  }
+
+  async flushPending(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+      await this.flushToDisk();
+      return;
+    }
+    if (this.flushPromise) {
+      await this.flushPromise;
+    }
+  }
+
+  private flushToDisk(): Promise<void> {
+    if (this.flushPromise) {
+      this.flushAgain = true;
+      return this.flushPromise;
+    }
+
+    this.flushPromise = (async () => {
+      do {
+        this.flushAgain = false;
+        const snapshot = JSON.stringify(
+          { version: 1, keys: this.keys },
+          null,
+          2,
+        );
+        await fsp.mkdir(path.dirname(this.filePath), {
+          recursive: true,
+          mode: 0o700,
+        });
+        await fsp.writeFile(this.filePath, snapshot, {
+          mode: 0o600,
+        });
+      } while (this.flushAgain);
+    })().finally(() => {
+      this.flushPromise = null;
+    });
+    return this.flushPromise;
   }
 
   private rebuildIndex(): void {
@@ -168,7 +239,10 @@ export class ApiKeyRegistry {
     return { key: secret, record };
   }
 
-  resolveLimits(tier: ApiKeyTier): { concurrency: number; maxRequests5h: number } {
+  resolveLimits(tier: ApiKeyTier): {
+    concurrency: number;
+    maxRequests5h: number;
+  } {
     return this.tierLimits[tier];
   }
 
@@ -176,14 +250,18 @@ export class ApiKeyRegistry {
     return this.keys.map((k) => ({ ...k }));
   }
 
-  createKey(input: {
-    tier?: ApiKeyTier;
-    name?: string;
-    enabled?: boolean;
-  }): { record: ApiKeyRecord; secret: string } {
+  createKey(input: { tier?: ApiKeyTier; name?: string; enabled?: boolean }): {
+    record: ApiKeyRecord;
+    secret: string;
+  } {
     const tier = input.tier ?? "lite";
     const secret = generateApiKey();
-    const record = this.makeRecord(secret, tier, input.name ?? tier, input.enabled ?? true);
+    const record = this.makeRecord(
+      secret,
+      tier,
+      input.name ?? tier,
+      input.enabled ?? true,
+    );
 
     if (tier === "admin") {
       for (const rec of this.keys) {
@@ -201,7 +279,7 @@ export class ApiKeyRegistry {
 
     this.reconcileAdminState(this.keys);
     this.rebuildIndex();
-    this.writeFile();
+    this.scheduleFlush();
     return { record: { ...record }, secret };
   }
 
@@ -235,7 +313,7 @@ export class ApiKeyRegistry {
 
     this.reconcileAdminState(this.keys);
     this.rebuildIndex();
-    this.writeFile();
+    this.scheduleFlush();
     return { record: { ...record }, changed: true };
   }
 

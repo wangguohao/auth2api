@@ -383,6 +383,12 @@ test("codex smart routing keeps session sticky until account cools down", () => 
       model: "gpt-5.5",
     });
     assert.equal(second.account?.token.email, "a@example.com");
+    assert.deepEqual(manager.getRoutingCacheStats(), {
+      size: 1,
+      hits: 1,
+      misses: 1,
+      hitRate: 0.5,
+    });
 
     manager.recordFailure("a@example.com", "rate_limit", "limit");
     const third = manager.getNextAccount({
@@ -1294,7 +1300,10 @@ function makeNotifyConfig(): Config2 {
 }
 
 function withFetchStub(
-  stub: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  stub: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>,
 ): () => void {
   const orig = globalThis.fetch;
   globalThis.fetch = stub as typeof fetch;
@@ -1328,10 +1337,10 @@ test("notifyServerReload posts to /admin/reload with the bootstrap admin key as 
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
-    return new Response(
-      JSON.stringify({ reloaded: {}, generated_at: "now" }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   });
   const cap = captureLogs();
   try {
@@ -1347,7 +1356,9 @@ test("notifyServerReload posts to /admin/reload with the bootstrap admin key as 
     (seen!.init?.headers as Record<string, string>)?.Authorization,
     "Bearer sk-test",
   );
-  assert.ok(cap.logs.some((l) => l.includes("Notified running auth2api server")));
+  assert.ok(
+    cap.logs.some((l) => l.includes("Notified running auth2api server")),
+  );
   assert.equal(cap.warns.length, 0);
 });
 

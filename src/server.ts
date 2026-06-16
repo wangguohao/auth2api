@@ -1,9 +1,5 @@
 import express from "express";
-import {
-  Config,
-  isDebugLevel,
-  resolveTierLimit,
-} from "./config";
+import { Config, isDebugLevel, resolveTierLimit } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import { ApiKeyRegistry } from "./auth/api-key-registry";
@@ -44,19 +40,25 @@ export function createServer(
 ): express.Application {
   const app = express();
   const ipRateLimitMap = new Map<string, { count: number; resetAt: number }>();
-  const apiKeyRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  const apiKeyRateLimitMap = new Map<
+    string,
+    { count: number; resetAt: number }
+  >();
   const apiKeyConcurrencyMap = new Map<string, number>();
 
   // Cleanup stale entries every 5 minutes.
-  const cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [ip, entry] of ipRateLimitMap) {
-      if (now > entry.resetAt) ipRateLimitMap.delete(ip);
-    }
-    for (const [apiKeyHash, entry] of apiKeyRateLimitMap) {
-      if (now > entry.resetAt) apiKeyRateLimitMap.delete(apiKeyHash);
-    }
-  }, 5 * 60 * 1000);
+  const cleanupTimer = setInterval(
+    () => {
+      const now = Date.now();
+      for (const [ip, entry] of ipRateLimitMap) {
+        if (now > entry.resetAt) ipRateLimitMap.delete(ip);
+      }
+      for (const [apiKeyHash, entry] of apiKeyRateLimitMap) {
+        if (now > entry.resetAt) apiKeyRateLimitMap.delete(apiKeyHash);
+      }
+    },
+    5 * 60 * 1000,
+  );
   cleanupTimer.unref();
 
   app.use(express.json({ limit: config["body-limit"] }));
@@ -143,7 +145,11 @@ export function createServer(
     next();
   };
 
-  const apiKeyRateLimitMiddleware: express.RequestHandler = (_req, res, next) => {
+  const apiKeyRateLimitMiddleware: express.RequestHandler = (
+    _req,
+    res,
+    next,
+  ) => {
     const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
     const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
     if (!apiKeyHash || !apiKeyTier) return next();
@@ -167,12 +173,17 @@ export function createServer(
     res.setHeader("Retry-After", String(retryAfterSeconds));
     res.status(429).json({
       error: {
-        message: "API key request limit exceeded for the configured tier window",
+        message:
+          "API key request limit exceeded for the configured tier window",
       },
     });
   };
 
-  const apiKeyConcurrencyMiddleware: express.RequestHandler = (_req, res, next) => {
+  const apiKeyConcurrencyMiddleware: express.RequestHandler = (
+    _req,
+    res,
+    next,
+  ) => {
     const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
     const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
     if (!apiKeyHash || !apiKeyTier) return next();
@@ -186,7 +197,8 @@ export function createServer(
       res.setHeader("Retry-After", "1");
       res.status(429).json({
         error: {
-          message: "API key concurrent request limit exceeded for the configured tier",
+          message:
+            "API key concurrent request limit exceeded for the configured tier",
         },
       });
       return;
@@ -305,12 +317,22 @@ export function createServer(
   app.get(ROUTES.adminAccounts.path, (_req, res) => {
     const providers: Record<
       string,
-      { accounts: unknown[]; account_count: number }
+      {
+        accounts: unknown[];
+        account_count: number;
+        routing_cache: {
+          size: number;
+          hits: number;
+          misses: number;
+          hitRate: number;
+        };
+      }
     > = {};
     for (const p of registry.all()) {
       providers[p.id] = {
         accounts: p.manager.getSnapshots(),
         account_count: p.manager.accountCount,
+        routing_cache: p.manager.getRoutingCacheStats(),
       };
     }
     res.json({
@@ -326,7 +348,7 @@ export function createServer(
     });
   });
 
-  app.post(ROUTES.adminApiKeysCreate.path, (req, res) => {
+  app.post(ROUTES.adminApiKeysCreate.path, async (req, res) => {
     const tier = req.body?.tier as ApiKeyTier | undefined;
     const name = typeof req.body?.name === "string" ? req.body.name : undefined;
     const enabled = req.body?.enabled === undefined ? true : !!req.body.enabled;
@@ -335,23 +357,33 @@ export function createServer(
       return;
     }
     if (tier === "admin" && enabled === false) {
-      res.status(400).json({ error: { message: "Admin key cannot be disabled" } });
+      res
+        .status(400)
+        .json({ error: { message: "Admin key cannot be disabled" } });
       return;
     }
-    const created = apiKeyRegistry.createKey({ tier, name, enabled });
-    res.status(201).json({
-      key: {
-        ...created.record,
-        secret: created.secret,
-      },
-      generated_at: new Date().toISOString(),
-    });
+    try {
+      const created = apiKeyRegistry.createKey({ tier, name, enabled });
+      await apiKeyRegistry.flushPending();
+      res.status(201).json({
+        key: {
+          ...created.record,
+          secret: created.secret,
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        error: { message: err?.message || "Failed to persist API key" },
+      });
+    }
   });
 
-  app.post(ROUTES.adminApiKeysEnable.path, (req, res) => {
+  app.post(ROUTES.adminApiKeysEnable.path, async (req, res) => {
     const id = req.params.id;
     try {
       const updated = apiKeyRegistry.updateKeyState(id, true);
+      await apiKeyRegistry.flushPending();
       res.json({
         key: updated.record,
         generated_at: new Date().toISOString(),
@@ -362,14 +394,16 @@ export function createServer(
         res.status(404).json({ error: { message } });
         return;
       }
-      res.status(400).json({ error: { message } });
+      const status = message === "Admin key cannot be disabled" ? 400 : 500;
+      res.status(status).json({ error: { message } });
     }
   });
 
-  app.post(ROUTES.adminApiKeysDisable.path, (req, res) => {
+  app.post(ROUTES.adminApiKeysDisable.path, async (req, res) => {
     const id = req.params.id;
     try {
       const updated = apiKeyRegistry.updateKeyState(id, false);
+      await apiKeyRegistry.flushPending();
       res.json({
         key: updated.record,
         generated_at: new Date().toISOString(),
@@ -380,7 +414,8 @@ export function createServer(
         res.status(404).json({ error: { message } });
         return;
       }
-      res.status(400).json({ error: { message } });
+      const status = message === "Admin key cannot be disabled" ? 400 : 500;
+      res.status(status).json({ error: { message } });
     }
   });
 
@@ -392,7 +427,7 @@ export function createServer(
   app.post(ROUTES.adminReload.path, async (_req, res) => {
     const reloaded: Record<string, unknown> = {};
     try {
-      apiKeyRegistry.reload();
+      await apiKeyRegistry.reload();
       reloaded["api-keys"] = { ok: true };
     } catch (err: any) {
       reloaded["api-keys"] = { error: err?.message || String(err) };

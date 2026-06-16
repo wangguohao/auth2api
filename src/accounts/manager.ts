@@ -81,9 +81,14 @@ interface RoutingMetadata {
 
 interface SessionBinding {
   email: string;
-  stickyUntil: number;
+  expiresAt: number;
   lastSeenAt: string;
   model: string | null;
+}
+
+interface RoutingPlan {
+  level: RoutingLevel;
+  baseScore: number;
 }
 
 /**
@@ -134,6 +139,7 @@ interface AccountState {
   totalReasoningOutputTokens: number;
   refreshPromise: Promise<boolean> | null;
   routing: RoutingMetadata;
+  routingPlan: RoutingPlan;
 }
 
 export interface AccountSnapshot {
@@ -179,6 +185,8 @@ export type AccountResult =
 
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
+const ROUTING_CACHE_TTL_MS = 10 * 60 * 1000;
+const ROUTING_CACHE_MAX_ENTRIES = 2048;
 
 function randomStickyDuration(): number {
   return STICKY_MIN_MS + Math.random() * (STICKY_MAX_MS - STICKY_MIN_MS);
@@ -243,6 +251,8 @@ export class AccountManager {
   private reloadPromise: Promise<ReloadStats> | null = null;
   private routingMode: RoutingMode;
   private sessionBindings: Map<string, SessionBinding> = new Map();
+  private routingCacheHits = 0;
+  private routingCacheMisses = 0;
 
   constructor(authDir: string, opts: AccountManagerOptions) {
     this.authDir = authDir;
@@ -334,6 +344,7 @@ export class AccountManager {
       existing.lastFailureKind = null;
       existing.lastError = null;
       existing.lastFailureAt = null;
+      existing.routingPlan = buildRoutingPlan(token);
       stats.updated.push(token.email);
     }
 
@@ -360,6 +371,7 @@ export class AccountManager {
       existing.lastFailureAt = null;
       existing.lastSuccessAt = new Date().toISOString();
       existing.lastRefreshAt = new Date().toISOString();
+      existing.routingPlan = buildRoutingPlan(token);
     } else {
       const state = this.createAccountState(token);
       state.lastSuccessAt = new Date().toISOString();
@@ -391,13 +403,31 @@ export class AccountManager {
 
     const now = Date.now();
 
+    if (count === 1 && !ctx?.apiKeyTier) {
+      const email = this.accountOrder[0];
+      const acct = this.accounts.get(email)!;
+      if (acct.cooldownUntil <= now) {
+        this.lastUsedIndex = 0;
+        this.stickyUntil = now + randomStickyDuration();
+        return {
+          account: buildAvailableAccount(
+            this.authDir,
+            email,
+            acct.token,
+            this.provider,
+          ),
+        };
+      }
+      return this.buildCooldownUnavailable(this.accountOrder, now);
+    }
+
     // Try to keep using the current sticky account
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
       if (
         acct.cooldownUntil <= now &&
-        this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+        this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
       ) {
         return {
           account: buildAvailableAccount(
@@ -418,7 +448,7 @@ export class AccountManager {
       const acct = this.accounts.get(email)!;
       if (
         acct.cooldownUntil <= now &&
-        this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+        this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
       ) {
         this.lastUsedIndex = idx;
         this.stickyUntil = now + randomStickyDuration();
@@ -436,7 +466,10 @@ export class AccountManager {
     if (ctx?.apiKeyTier) {
       const tierEligible = this.accountOrder.filter((email) => {
         const acct = this.accounts.get(email)!;
-        return this.isAccountAllowedForTier(acct.token.routing?.level, ctx.apiKeyTier);
+        return this.isAccountAllowedForTier(
+          acct.routingPlan.level,
+          ctx.apiKeyTier,
+        );
       });
       if (tierEligible.length === 0) {
         return {
@@ -452,7 +485,10 @@ export class AccountManager {
     return this.buildCooldownUnavailable(this.accountOrder, now);
   }
 
-  private buildCooldownUnavailable(emails: string[], now: number): AccountResult {
+  private buildCooldownUnavailable(
+    emails: string[],
+    now: number,
+  ): AccountResult {
     const firstAcct = this.accounts.get(emails[0])!;
     let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
     let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
@@ -489,13 +525,15 @@ export class AccountManager {
 
     if (ctx?.sessionKey) {
       const binding = this.sessionBindings.get(ctx.sessionKey);
-      if (binding && binding.stickyUntil > now) {
+      if (binding && binding.expiresAt > now) {
         const acct = this.accounts.get(binding.email);
         if (
           acct &&
           this.isStickyReusable(acct, now) &&
-          this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+          this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
         ) {
+          this.routingCacheHits++;
+          this.touchSessionBinding(ctx.sessionKey, binding, now);
           acct.routing.lastActiveAt = new Date(now).toISOString();
           this.maybeRefreshRoutingMetadata(acct, now, "activity");
           return {
@@ -508,6 +546,7 @@ export class AccountManager {
           };
         }
       }
+      this.routingCacheMisses++;
     }
 
     const candidates = this.accountOrder
@@ -515,12 +554,15 @@ export class AccountManager {
       .filter(
         ({ acct }) =>
           acct.cooldownUntil <= now &&
-          this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier),
+          this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier),
       );
     if (candidates.length === 0) {
       const tierEligible = this.accountOrder.filter((email) => {
         const acct = this.accounts.get(email)!;
-        return this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier);
+        return this.isAccountAllowedForTier(
+          acct.routingPlan.level,
+          ctx?.apiKeyTier,
+        );
       });
       if (ctx?.apiKeyTier && tierEligible.length === 0) {
         return {
@@ -553,10 +595,16 @@ export class AccountManager {
     if (ctx?.sessionKey) {
       this.sessionBindings.set(ctx.sessionKey, {
         email: best.email,
-        stickyUntil: now + this.computeSessionStickyDuration(best.acct, now),
+        expiresAt:
+          now +
+          Math.min(
+            ROUTING_CACHE_TTL_MS,
+            this.computeSessionStickyDuration(best.acct, now),
+          ),
         lastSeenAt: new Date(now).toISOString(),
         model: ctx.model ?? null,
       });
+      this.enforceSessionBindingLimit();
     }
 
     return {
@@ -659,7 +707,8 @@ export class AccountManager {
       acct.routing.windowType ?? inferWindowType(acct.token.planType);
     acct.routing.resetPeriodMs =
       acct.routing.resetPeriodMs ?? inferResetPeriodMs(acct.token.planType);
-    acct.routing.nextRefreshAt = now + this.metadataRefreshIntervalMs(acct, now);
+    acct.routing.nextRefreshAt =
+      now + this.metadataRefreshIntervalMs(acct, now);
   }
 
   getSnapshots(): AccountSnapshot[] {
@@ -688,9 +737,7 @@ export class AccountManager {
         routingExtra: acct.token.routing,
         planType: acct.token.planType,
         routing:
-          this.routingMode === "codex-smart"
-            ? { ...acct.routing }
-            : undefined,
+          this.routingMode === "codex-smart" ? { ...acct.routing } : undefined,
       });
     }
     return snapshots;
@@ -762,6 +809,21 @@ export class AccountManager {
     return this.accounts.size;
   }
 
+  getRoutingCacheStats(): {
+    size: number;
+    hits: number;
+    misses: number;
+    hitRate: number;
+  } {
+    const total = this.routingCacheHits + this.routingCacheMisses;
+    return {
+      size: this.sessionBindings.size,
+      hits: this.routingCacheHits,
+      misses: this.routingCacheMisses,
+      hitRate: total === 0 ? 0 : this.routingCacheHits / total,
+    };
+  }
+
   private shouldRefresh(acct: AccountState, now: number): boolean {
     const policy = this.refreshPolicy;
     if (policy.kind === "expires-lead") {
@@ -819,6 +881,7 @@ export class AccountManager {
       acct.lastFailureAt = null;
       acct.lastSuccessAt = refreshAt;
       acct.lastRefreshAt = refreshAt;
+      acct.routingPlan = buildRoutingPlan(newToken);
       console.log(
         `[${this.provider}] token refreshed for ${newToken.email}, expires ${newToken.expiresAt}`,
       );
@@ -881,12 +944,32 @@ export class AccountManager {
         windowType: inferWindowType(token.planType),
         resetPeriodMs: inferResetPeriodMs(token.planType),
       },
+      routingPlan: buildRoutingPlan(token),
     };
   }
 
   private reapExpiredSessionBindings(now: number): void {
     for (const [key, binding] of this.sessionBindings) {
-      if (binding.stickyUntil <= now) this.sessionBindings.delete(key);
+      if (binding.expiresAt <= now) this.sessionBindings.delete(key);
+    }
+  }
+
+  private touchSessionBinding(
+    key: string,
+    binding: SessionBinding,
+    now: number,
+  ): void {
+    binding.lastSeenAt = new Date(now).toISOString();
+    // Move to the back so Map iteration order doubles as LRU order.
+    this.sessionBindings.delete(key);
+    this.sessionBindings.set(key, binding);
+  }
+
+  private enforceSessionBindingLimit(): void {
+    while (this.sessionBindings.size > ROUTING_CACHE_MAX_ENTRIES) {
+      const oldest = this.sessionBindings.keys().next().value;
+      if (!oldest) break;
+      this.sessionBindings.delete(oldest);
     }
   }
 
@@ -902,7 +985,7 @@ export class AccountManager {
     apiKeyTier: ApiKeyTier | undefined,
   ): boolean {
     if (!apiKeyTier) return true;
-    const level = (accountLevel || "lite").toLowerCase() as RoutingLevel;
+    const level = accountLevel || "lite";
     switch (apiKeyTier) {
       case "admin":
         return true;
@@ -917,10 +1000,8 @@ export class AccountManager {
 
   private scoreCodexCandidate(acct: AccountState, now: number): number {
     const resetUrgency = this.computeResetUrgency(acct, now);
-    const planBias = planTypeBias(acct.token.planType);
-    const routingBias = acct.token.routing?.bias ?? 0;
     const healthPenalty = Math.min(acct.failureCount * 0.15, 0.6);
-    return resetUrgency * 0.75 + planBias + routingBias - healthPenalty;
+    return resetUrgency * 0.75 + acct.routingPlan.baseScore - healthPenalty;
   }
 
   private computeResetUrgency(acct: AccountState, now: number): number {
@@ -931,7 +1012,10 @@ export class AccountManager {
     return 1 - clamped / resetPeriodMs;
   }
 
-  private computeSessionStickyDuration(acct: AccountState, now: number): number {
+  private computeSessionStickyDuration(
+    acct: AccountState,
+    now: number,
+  ): number {
     const resetAtMs = acct.routing.resetAt
       ? new Date(acct.routing.resetAt).getTime()
       : null;
@@ -977,7 +1061,8 @@ export class AccountManager {
       acct.routing.resetAt = new Date(resetAtMs).toISOString();
     }
     acct.routing.lastQuotaSyncAt = new Date(now).toISOString();
-    acct.routing.nextRefreshAt = now + this.metadataRefreshIntervalMs(acct, now);
+    acct.routing.nextRefreshAt =
+      now + this.metadataRefreshIntervalMs(acct, now);
   }
 
   private metadataRefreshIntervalMs(acct: AccountState, now: number): number {
@@ -1017,19 +1102,26 @@ function inferWindowType(planType: string | undefined): string | null {
 }
 
 function planTypeBias(planType: string | undefined): number {
-    switch ((planType || "").toLowerCase()) {
-      case "plus":
-        return 0.08;
-      case "pro":
-        return 0.05;
-      case "team":
-        return 0.03;
-      case "free":
-        return 1;
-      default:
-        return 0;
-    }
+  switch ((planType || "").toLowerCase()) {
+    case "plus":
+      return 0.08;
+    case "pro":
+      return 0.05;
+    case "team":
+      return 0.03;
+    case "free":
+      return 1;
+    default:
+      return 0;
   }
+}
+
+function buildRoutingPlan(token: TokenData): RoutingPlan {
+  return {
+    level: (token.routing?.level || "lite").toLowerCase() as RoutingLevel,
+    baseScore: planTypeBias(token.planType) + (token.routing?.bias ?? 0),
+  };
+}
 
 function parseRetryAfterMs(header: string): number | null {
   const seconds = Number(header);

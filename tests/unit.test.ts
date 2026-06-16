@@ -67,7 +67,10 @@ test("parseRoutingExtraArg parses routing bias and level", () => {
 
 test("parseRoutingExtraArg rejects invalid JSON and legacy fields", () => {
   assert.throws(() => parseRoutingExtraArg("{"), /Invalid --routingExtra JSON/);
-  assert.throws(() => parseRoutingExtraArg('{"weight":1}'), /Unsupported --routingExtra field: weight/);
+  assert.throws(
+    () => parseRoutingExtraArg('{"weight":1}'),
+    /Unsupported --routingExtra field: weight/,
+  );
   assert.throws(
     () => parseRoutingExtraArg('{"routingBias":1}'),
     /Unsupported --routingExtra field: routingBias/,
@@ -538,10 +541,7 @@ test("ApiKeyRegistry keeps bootstrap admin record even when another admin alread
 
     const keys = registry.list();
     assert.ok(keys.some((k) => k.secret === "sk-bootstrap-admin"));
-    assert.equal(
-      keys.filter((k) => k.tier === "admin" && k.enabled).length,
-      1,
-    );
+    assert.equal(keys.filter((k) => k.tier === "admin" && k.enabled).length, 1);
     assert.equal(registry.getAdminSecret(), "sk-existing-admin");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -581,6 +581,40 @@ test("ApiKeyRegistry supports enabling and disabling non-admin keys", () => {
   }
 });
 
+test("ApiKeyRegistry reload flushes pending changes before reading disk", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      flushDebounceMs: 60_000,
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    const created = registry.createKey({
+      tier: "lite",
+      name: "client",
+    });
+    await registry.reload();
+
+    assert.ok(registry.authenticate(created.secret));
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "api-keys.json"), "utf-8"),
+    );
+    assert.ok(
+      persisted.keys.some(
+        (key: { secret: string }) => key.secret === created.secret,
+      ),
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("ApiKeyRegistry rejects disabling the admin key", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
   try {
@@ -595,7 +629,10 @@ test("ApiKeyRegistry rejects disabling the admin key", () => {
     registry.load();
     const admin = registry.list().find((k) => k.tier === "admin" && k.enabled);
     assert.ok(admin);
-    assert.throws(() => registry.updateKeyState(admin!.id, false), /cannot be disabled/);
+    assert.throws(
+      () => registry.updateKeyState(admin!.id, false),
+      /cannot be disabled/,
+    );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -1490,7 +1527,9 @@ test("createServer stats records api-key rate-limited requests", async () => {
   try {
     const port = (server.address() as any).port;
     const headers = { Authorization: "Bearer sk-lite" };
-    const first = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers });
+    const first = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers,
+    });
     const second = await fetch(`http://127.0.0.1:${port}/v1/models`, {
       headers,
     });

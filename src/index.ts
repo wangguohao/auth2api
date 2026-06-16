@@ -13,6 +13,9 @@ import { getRouteLines } from "./routes";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
+import { installFetchKeepAliveAgent } from "./utils/fetch-agent";
+
+installFetchKeepAliveAgent();
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -243,15 +246,21 @@ async function main(): Promise<void> {
       .find((a) => a.startsWith("--cursor-storage="))
       ?.split("=", 2)[1];
     const extra = parseRoutingExtraArg(
-      args.find((a) => a.startsWith("--routingExtra="))?.slice(
-        "--routingExtra=".length,
-      ),
+      args
+        .find((a) => a.startsWith("--routingExtra="))
+        ?.slice("--routingExtra=".length),
     );
     const registry = buildRegistry(authDir);
     for (const p of registry.all()) p.manager.load();
     if (providerId === "cursor") {
       if (cursorStorage || args.includes("--cursor-import-local")) {
-        await importCursorLogin(config, registry, apiKeys, cursorStorage, extra);
+        await importCursorLogin(
+          config,
+          registry,
+          apiKeys,
+          cursorStorage,
+          extra,
+        );
       } else {
         await browserCursorLogin(config, registry, apiKeys, extra);
       }
