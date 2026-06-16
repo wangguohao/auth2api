@@ -9,6 +9,7 @@ import {
 } from "../auth/codex/oauth";
 import { callCodexResponses } from "../upstream/codex-api";
 import { listCodexModels } from "../upstream/codex-models";
+import { fetchCodexUsage } from "../upstream/codex-usage";
 import { Provider, UpstreamCallContext, ProviderOAuthInfo } from "./types";
 
 const CODEX_OAUTH: ProviderOAuthInfo = {
@@ -27,6 +28,7 @@ export function buildCodexProvider(authDir: string): Provider {
       const token = await refreshCodexTokensWithRetry(rt);
       return { ...token, provider: "codex" };
     },
+    usageRefresh: fetchCodexUsage,
     routingMode: "codex-smart",
     // Mirrors codex-rs/login/src/auth/manager.rs TOKEN_REFRESH_INTERVAL = 8 days.
     refreshPolicy: { kind: "since-last-refresh", maxAgeMs: 8 * 86_400_000 },

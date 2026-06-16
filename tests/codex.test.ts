@@ -23,6 +23,7 @@ import {
 import { waitForCallback } from "../src/auth/callback-server";
 import http from "node:http";
 import { buildSessionBindingKey } from "../src/routing/session";
+import { fetchCodexUsage } from "../src/upstream/codex-usage";
 
 // ══════════════════════════════════════════════════
 // utils/jwt.ts
@@ -1311,6 +1312,122 @@ function withFetchStub(
     globalThis.fetch = orig;
   };
 }
+
+test("fetchCodexUsage maps wham usage buckets", async () => {
+  const restore = withFetchStub(async (_input, init) => {
+    assert.equal(init?.method, "GET");
+    assert.equal(
+      (init?.headers as Record<string, string>).Authorization,
+      "Bearer access-token",
+    );
+    assert.equal(
+      (init?.headers as Record<string, string>)["ChatGPT-Account-ID"],
+      "acct_123",
+    );
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: {
+            used_percent: 0.31,
+            reset_at: 1_786_171_200,
+          },
+          secondary_window: {
+            used_percent: 82,
+            reset_at: 1_786_776_000,
+          },
+        },
+        credits: {
+          unlimited: false,
+          balance: 1234,
+        },
+      }),
+      { status: 200 },
+    );
+  });
+  try {
+    const usage = await fetchCodexUsage({
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      email: "test@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct_123",
+      provider: "codex",
+    });
+    assert.equal(usage.source, "chatgpt_wham_usage");
+    assert.deepEqual(
+      usage.buckets.map((bucket) => ({
+        id: bucket.id,
+        usedPercent: bucket.usedPercent,
+        window: bucket.window,
+        valueLabel: bucket.valueLabel,
+      })),
+      [
+        { id: "primary", usedPercent: 31, window: "5h", valueLabel: null },
+        { id: "weekly", usedPercent: 82, window: "7d", valueLabel: null },
+        {
+          id: "credits",
+          usedPercent: null,
+          window: null,
+          valueLabel: "$12.34 remaining",
+        },
+      ],
+    );
+    assert.ok(usage.buckets[0].resetsAt);
+    assert.ok(usage.buckets[1].resetsAt);
+  } finally {
+    restore();
+  }
+});
+
+test("AccountManager refreshUsage updates usage snapshot fields", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("not used");
+      },
+      usageRefresh: async () => ({
+        source: "test",
+        buckets: [
+          {
+            id: "weekly",
+            label: "Weekly limit",
+            window: "7d",
+            usedPercent: 12,
+            resetsAt: "2030-01-08T00:00:00.000Z",
+            valueLabel: null,
+            detail: null,
+          },
+        ],
+      }),
+    });
+    manager.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "usage@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct",
+      provider: "codex",
+    });
+
+    const refreshed = await manager.refreshUsage("usage@example.com");
+    const snap = refreshed["usage@example.com"];
+    assert.equal(snap.status, "success");
+    assert.equal(snap.source, "test");
+    assert.equal(snap.buckets.length, 1);
+    assert.ok(snap.lastRefreshAt);
+    assert.ok(snap.lastWeeklyRefreshAt);
+    assert.equal(snap.nextRefreshAt, null);
+    assert.ok(snap.nextIdleRefreshAt);
+
+    const accountSnap = manager.getSnapshots()[0].usage!;
+    assert.equal(accountSnap.status, "success");
+    assert.equal(accountSnap.lastWeeklyRefreshAt, snap.lastWeeklyRefreshAt);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 
 function captureLogs(): {
   logs: string[];

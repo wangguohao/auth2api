@@ -195,6 +195,7 @@ async function startServer(): Promise<void> {
     if (p.manager.accountCount > 0) {
       p.manager.startAutoRefresh();
       p.manager.startStatsLogger();
+      p.manager.startUsageRefresher();
     }
   }
 
@@ -220,6 +221,7 @@ async function startServer(): Promise<void> {
     for (const p of registry.all()) {
       p.manager.stopAutoRefresh();
       p.manager.stopStatsLogger();
+      p.manager.stopUsageRefresher();
     }
     if (statsRecorder) {
       // Best-effort flush — exit even if close hangs so SIGINT stays responsive.

@@ -59,11 +59,42 @@ export interface UsageData {
   reasoningOutputTokens: number;
 }
 
+export type AccountUsageRefreshStatus = "never" | "success" | "failure";
+
+export interface AccountUsageBucket {
+  id: string;
+  label: string;
+  window: string | null;
+  usedPercent: number | null;
+  resetsAt: string | null;
+  valueLabel: string | null;
+  detail: string | null;
+}
+
+export interface AccountUsageSnapshot {
+  status: AccountUsageRefreshStatus;
+  source: string | null;
+  buckets: AccountUsageBucket[];
+  lastRefreshAt: string | null;
+  lastWeeklyRefreshAt: string | null;
+  nextRefreshAt: string | null;
+  nextIdleRefreshAt: string | null;
+  lastError: string | null;
+}
+
 export interface AccountSelectionContext {
   sessionKey?: string;
   model?: string;
   path?: string;
   apiKeyTier?: ApiKeyTier;
+}
+
+export interface AccountRoutingDecision {
+  mode: "default" | "codex-smart";
+  reason: string;
+  sessionCache: "hit" | "miss" | "none";
+  candidateCount?: number;
+  selectedLevel?: RoutingLevel;
 }
 
 type RoutingMode = "default" | "codex-smart";
@@ -138,6 +169,10 @@ interface AccountState {
   totalCacheReadInputTokens: number;
   totalReasoningOutputTokens: number;
   refreshPromise: Promise<boolean> | null;
+  usage: AccountUsageSnapshot;
+  usageRefreshPromise: Promise<AccountUsageSnapshot> | null;
+  usageActiveRefreshAt: number | null;
+  usageIdleRefreshAt: number | null;
   routing: RoutingMetadata;
   routingPlan: RoutingPlan;
 }
@@ -164,6 +199,7 @@ export interface AccountSnapshot {
   routingExtra?: RoutingConfig;
   /** Codex only — chatgpt_plan_type claim ("plus", "pro", "free", …). */
   planType?: string;
+  usage?: AccountUsageSnapshot;
   routing?: RoutingMetadata;
 }
 
@@ -176,17 +212,21 @@ export interface AvailableAccount {
 }
 
 export type AccountResult =
-  | { account: AvailableAccount }
+  | { account: AvailableAccount; decision?: AccountRoutingDecision }
   | {
       account: null;
       failureKind: AccountFailureKind | null;
       retryAfterMs: number | null;
+      decision?: AccountRoutingDecision;
     };
 
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
 const ROUTING_CACHE_TTL_MS = 10 * 60 * 1000;
 const ROUTING_CACHE_MAX_ENTRIES = 2048;
+const USAGE_ACTIVE_IDLE_REFRESH_MS = 10 * 60 * 1000;
+const USAGE_IDLE_REFRESH_MS = 60 * 60 * 1000;
+const USAGE_REFRESH_CHECK_INTERVAL_MS = 60 * 1000;
 
 function randomStickyDuration(): number {
   return STICKY_MIN_MS + Math.random() * (STICKY_MAX_MS - STICKY_MIN_MS);
@@ -202,10 +242,24 @@ const FAILURE_PRIORITY: Record<AccountFailureKind, number> = {
 };
 
 export type RefreshFn = (refreshToken: string) => Promise<TokenData>;
+export type UsageRefreshFn = (
+  token: TokenData,
+) => Promise<
+  Omit<
+    AccountUsageSnapshot,
+    | "status"
+    | "lastRefreshAt"
+    | "lastWeeklyRefreshAt"
+    | "nextRefreshAt"
+    | "nextIdleRefreshAt"
+    | "lastError"
+  >
+>;
 
 export interface AccountManagerOptions {
   provider: ProviderId;
   refresh: RefreshFn;
+  usageRefresh?: UsageRefreshFn;
   /** Default: expires-lead 4h. Codex should pass since-last-refresh 8d. */
   refreshPolicy?: RefreshPolicy;
   routingMode?: RoutingMode;
@@ -236,6 +290,19 @@ function buildAvailableAccount(
   };
 }
 
+function emptyUsageSnapshot(): AccountUsageSnapshot {
+  return {
+    status: "never",
+    source: null,
+    buckets: [],
+    lastRefreshAt: null,
+    lastWeeklyRefreshAt: null,
+    nextRefreshAt: null,
+    nextIdleRefreshAt: null,
+    lastError: null,
+  };
+}
+
 export class AccountManager {
   private accounts: Map<string, AccountState> = new Map();
   private accountOrder: string[] = []; // emails in insertion order for round-robin
@@ -244,9 +311,11 @@ export class AccountManager {
   private authDir: string;
   private refreshTimer: NodeJS.Timeout | null = null;
   private statsTimer: NodeJS.Timeout | null = null;
+  private usageTimer: NodeJS.Timeout | null = null;
   private refreshing = false;
   readonly provider: ProviderId;
   private refreshFn: RefreshFn;
+  private usageRefreshFn?: UsageRefreshFn;
   private refreshPolicy: RefreshPolicy;
   private reloadPromise: Promise<ReloadStats> | null = null;
   private routingMode: RoutingMode;
@@ -258,6 +327,7 @@ export class AccountManager {
     this.authDir = authDir;
     this.provider = opts.provider;
     this.refreshFn = opts.refresh;
+    this.usageRefreshFn = opts.usageRefresh;
     this.refreshPolicy = opts.refreshPolicy ?? DEFAULT_REFRESH_POLICY;
     this.routingMode = opts.routingMode ?? "default";
   }
@@ -345,6 +415,7 @@ export class AccountManager {
       existing.lastError = null;
       existing.lastFailureAt = null;
       existing.routingPlan = buildRoutingPlan(token);
+      existing.usage.lastError = null;
       stats.updated.push(token.email);
     }
 
@@ -372,6 +443,7 @@ export class AccountManager {
       existing.lastSuccessAt = new Date().toISOString();
       existing.lastRefreshAt = new Date().toISOString();
       existing.routingPlan = buildRoutingPlan(token);
+      existing.usage.lastError = null;
     } else {
       const state = this.createAccountState(token);
       state.lastSuccessAt = new Date().toISOString();
@@ -398,7 +470,17 @@ export class AccountManager {
   private getNextDefaultAccount(ctx?: AccountSelectionContext): AccountResult {
     const count = this.accountOrder.length;
     if (count === 0) {
-      return { account: null, failureKind: null, retryAfterMs: null };
+      return {
+        account: null,
+        failureKind: null,
+        retryAfterMs: null,
+        decision: {
+          mode: "default",
+          reason: "no_accounts",
+          sessionCache: "none",
+          candidateCount: 0,
+        },
+      };
     }
 
     const now = Date.now();
@@ -416,6 +498,13 @@ export class AccountManager {
             acct.token,
             this.provider,
           ),
+          decision: {
+            mode: "default",
+            reason: "single_available_account",
+            sessionCache: "none",
+            candidateCount: 1,
+            selectedLevel: acct.routingPlan.level,
+          },
         };
       }
       return this.buildCooldownUnavailable(this.accountOrder, now);
@@ -436,6 +525,13 @@ export class AccountManager {
             acct.token,
             this.provider,
           ),
+          decision: {
+            mode: "default",
+            reason: "sticky_account",
+            sessionCache: "none",
+            candidateCount: count,
+            selectedLevel: acct.routingPlan.level,
+          },
         };
       }
     }
@@ -459,6 +555,13 @@ export class AccountManager {
             acct.token,
             this.provider,
           ),
+          decision: {
+            mode: "default",
+            reason: "round_robin_available_account",
+            sessionCache: "none",
+            candidateCount: count,
+            selectedLevel: acct.routingPlan.level,
+          },
         };
       }
     }
@@ -476,6 +579,12 @@ export class AccountManager {
           account: null,
           failureKind: "forbidden",
           retryAfterMs: null,
+          decision: {
+            mode: "default",
+            reason: "tier_not_allowed",
+            sessionCache: "none",
+            candidateCount: 0,
+          },
         };
       }
       return this.buildCooldownUnavailable(tierEligible, now);
@@ -517,7 +626,17 @@ export class AccountManager {
   private getNextCodexAccount(ctx?: AccountSelectionContext): AccountResult {
     const count = this.accountOrder.length;
     if (count === 0) {
-      return { account: null, failureKind: null, retryAfterMs: null };
+      return {
+        account: null,
+        failureKind: null,
+        retryAfterMs: null,
+        decision: {
+          mode: "codex-smart",
+          reason: "no_accounts",
+          sessionCache: "none",
+          candidateCount: 0,
+        },
+      };
     }
 
     const now = Date.now();
@@ -543,6 +662,13 @@ export class AccountManager {
               acct.token,
               this.provider,
             ),
+            decision: {
+              mode: "codex-smart",
+              reason: "session_binding",
+              sessionCache: "hit",
+              candidateCount: count,
+              selectedLevel: acct.routingPlan.level,
+            },
           };
         }
       }
@@ -569,6 +695,12 @@ export class AccountManager {
           account: null,
           failureKind: "forbidden",
           retryAfterMs: null,
+          decision: {
+            mode: "codex-smart",
+            reason: "tier_not_allowed",
+            sessionCache: ctx?.sessionKey ? "miss" : "none",
+            candidateCount: 0,
+          },
         };
       }
       return this.buildCooldownUnavailable(
@@ -614,6 +746,13 @@ export class AccountManager {
         best.acct.token,
         this.provider,
       ),
+      decision: {
+        mode: "codex-smart",
+        reason: "smart_score",
+        sessionCache: ctx?.sessionKey ? "miss" : "none",
+        candidateCount: candidates.length,
+        selectedLevel: best.acct.routingPlan.level,
+      },
     };
   }
 
@@ -623,6 +762,7 @@ export class AccountManager {
       acct.totalRequests++;
       const now = Date.now();
       acct.routing.lastActiveAt = new Date(now).toISOString();
+      this.scheduleUsageRefresh(acct, now);
       this.maybeRefreshRoutingMetadata(acct, now, "activity");
     }
   }
@@ -736,6 +876,10 @@ export class AccountManager {
         refreshing: acct.refreshPromise !== null,
         routingExtra: acct.token.routing,
         planType: acct.token.planType,
+        usage: {
+          ...acct.usage,
+          buckets: acct.usage.buckets.map((b) => ({ ...b })),
+        },
         routing:
           this.routingMode === "codex-smart" ? { ...acct.routing } : undefined,
       });
@@ -781,6 +925,27 @@ export class AccountManager {
     }
   }
 
+  startUsageRefresher(): void {
+    if (!this.usageRefreshFn || this.usageTimer) return;
+    const timer = setInterval(() => {
+      this.refreshUsageDue().catch((err) =>
+        console.error(
+          `[${this.provider}] usage refresh cycle failed:`,
+          err.message,
+        ),
+      );
+    }, USAGE_REFRESH_CHECK_INTERVAL_MS);
+    timer.unref();
+    this.usageTimer = timer;
+  }
+
+  stopUsageRefresher(): void {
+    if (this.usageTimer) {
+      clearInterval(this.usageTimer);
+      this.usageTimer = null;
+    }
+  }
+
   private logStats(): void {
     if (this.accounts.size === 0) return;
     console.log(
@@ -803,6 +968,20 @@ export class AccountManager {
       );
     }
     console.log(`====================================================\n`);
+  }
+
+  async refreshUsage(
+    email?: string,
+  ): Promise<Record<string, AccountUsageSnapshot>> {
+    const result: Record<string, AccountUsageSnapshot> = {};
+    if (!this.usageRefreshFn) return result;
+    const targets = email
+      ? [this.accounts.get(email)].filter((acct): acct is AccountState => !!acct)
+      : Array.from(this.accounts.values());
+    for (const acct of targets) {
+      result[acct.token.email] = await this.refreshAccountUsage(acct, true);
+    }
+    return result;
   }
 
   get accountCount(): number {
@@ -835,6 +1014,90 @@ export class AccountManager {
     if (!acct.lastRefreshAt) return false;
     const last = new Date(acct.lastRefreshAt).getTime();
     return now - last >= policy.maxAgeMs;
+  }
+
+  private scheduleUsageRefresh(acct: AccountState, now: number): void {
+    if (!this.usageRefreshFn) return;
+    acct.usageActiveRefreshAt = now + USAGE_ACTIVE_IDLE_REFRESH_MS;
+    acct.usageIdleRefreshAt = now + USAGE_IDLE_REFRESH_MS;
+    acct.usage.nextRefreshAt = new Date(acct.usageActiveRefreshAt).toISOString();
+    acct.usage.nextIdleRefreshAt = new Date(
+      acct.usageIdleRefreshAt,
+    ).toISOString();
+  }
+
+  private async refreshUsageDue(): Promise<void> {
+    if (!this.usageRefreshFn) return;
+    const now = Date.now();
+    for (const acct of this.accounts.values()) {
+      const dueAt =
+        acct.usageActiveRefreshAt !== null
+          ? acct.usageActiveRefreshAt
+          : acct.usageIdleRefreshAt;
+      if (dueAt !== null && now >= dueAt) {
+        await this.refreshAccountUsage(acct, false);
+      }
+    }
+  }
+
+  private async refreshAccountUsage(
+    acct: AccountState,
+    force: boolean,
+  ): Promise<AccountUsageSnapshot> {
+    if (!this.usageRefreshFn) {
+      return {
+        ...acct.usage,
+        buckets: acct.usage.buckets.map((bucket) => ({ ...bucket })),
+      };
+    }
+    if (!force && acct.usageRefreshPromise) return acct.usageRefreshPromise;
+    if (force && acct.usageRefreshPromise) {
+      await acct.usageRefreshPromise.catch(() => null);
+    }
+    if (!force && acct.usageRefreshPromise) return acct.usageRefreshPromise;
+
+    const run = (async () => {
+      const refreshedAt = new Date().toISOString();
+      try {
+        const next = await this.usageRefreshFn!(acct.token);
+        const weeklyBucket = next.buckets.find((bucket) =>
+          /week/i.test(bucket.id) || /week/i.test(bucket.label),
+        );
+        acct.usage = {
+          ...next,
+          status: "success",
+          lastRefreshAt: refreshedAt,
+          lastWeeklyRefreshAt: weeklyBucket
+            ? refreshedAt
+            : acct.usage.lastWeeklyRefreshAt,
+          nextRefreshAt: null,
+          nextIdleRefreshAt: null,
+          lastError: null,
+        };
+      } catch (err: any) {
+        acct.usage = {
+          ...acct.usage,
+          status: "failure",
+          lastError: err?.message || String(err),
+          lastRefreshAt: refreshedAt,
+        };
+      } finally {
+        const now = Date.now();
+        acct.usageRefreshPromise = null;
+        acct.usageActiveRefreshAt = null;
+        acct.usageIdleRefreshAt = now + USAGE_IDLE_REFRESH_MS;
+        acct.usage.nextRefreshAt = null;
+        acct.usage.nextIdleRefreshAt = new Date(
+          acct.usageIdleRefreshAt,
+        ).toISOString();
+      }
+      return {
+        ...acct.usage,
+        buckets: acct.usage.buckets.map((b) => ({ ...b })),
+      };
+    })();
+    acct.usageRefreshPromise = run;
+    return run;
   }
 
   private async refreshAll(): Promise<void> {
@@ -935,6 +1198,10 @@ export class AccountManager {
       totalCacheReadInputTokens: 0,
       totalReasoningOutputTokens: 0,
       refreshPromise: null,
+      usage: emptyUsageSnapshot(),
+      usageRefreshPromise: null,
+      usageActiveRefreshAt: null,
+      usageIdleRefreshAt: null,
       routing: {
         resetAt: null,
         lastQuotaSyncAt: null,

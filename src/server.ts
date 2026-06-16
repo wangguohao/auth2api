@@ -344,6 +344,38 @@ export function createServer(
     });
   });
 
+  app.post(ROUTES.adminAccountsUsageRefresh.path, async (req, res) => {
+    const providerId = req.body?.provider;
+    const email =
+      typeof req.body?.email === "string" ? req.body.email : undefined;
+    if (
+      providerId !== undefined &&
+      providerId !== "anthropic" &&
+      providerId !== "codex" &&
+      providerId !== "cursor"
+    ) {
+      res.status(400).json({ error: { message: "Invalid provider" } });
+      return;
+    }
+
+    const providers = providerId
+      ? registry.all().filter((provider) => provider.id === providerId)
+      : registry.all();
+    const refreshed: Record<string, unknown> = {};
+    for (const provider of providers) {
+      try {
+        refreshed[provider.id] = await provider.manager.refreshUsage(email);
+      } catch (err: any) {
+        refreshed[provider.id] = { error: err?.message || String(err) };
+      }
+    }
+
+    res.json({
+      refreshed,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
   app.get(ROUTES.adminApiKeys.path, (_req, res) => {
     res.json({
       keys: apiKeyRegistry.list().map(({ secret, ...rest }) => rest),

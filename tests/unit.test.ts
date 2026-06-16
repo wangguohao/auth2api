@@ -1566,6 +1566,90 @@ test("createServer stats does not record admin endpoints", async () => {
   }
 });
 
+test("createServer supports manual account usage refresh", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const apiKeys = makeApiKeyRegistry(tmp);
+  let calledWithEmail: string | undefined;
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {
+      all: () => [
+        {
+          id: "codex",
+          manager: {
+            refreshUsage: async (email?: string) => {
+              calledWithEmail = email;
+              return {
+                "codex@example.com": {
+                  status: "success",
+                  source: "test",
+                  buckets: [],
+                  lastRefreshAt: "2030-01-01T00:00:00.000Z",
+                  lastWeeklyRefreshAt: null,
+                  nextRefreshAt: null,
+                  nextIdleRefreshAt: "2030-01-01T01:00:00.000Z",
+                  lastError: null,
+                },
+              };
+            },
+          },
+        },
+        {
+          id: "anthropic",
+          manager: {
+            refreshUsage: async () => ({}),
+          },
+        },
+      ],
+      withAccounts: () => [],
+    } as any,
+    apiKeys,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/accounts/usage/refresh`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer sk-test",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "codex",
+          email: "codex@example.com",
+        }),
+      },
+    );
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(calledWithEmail, "codex@example.com");
+    assert.equal(body.refreshed.codex["codex@example.com"].status, "success");
+    assert.equal(body.refreshed.anthropic, undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("createServer stats records client disconnects on close", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();

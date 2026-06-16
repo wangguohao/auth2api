@@ -6,6 +6,10 @@ export const ROUTES = {
   v1CountTokens: { method: "POST", path: "/v1/messages/count_tokens" },
   v1Models: { method: "GET", path: "/v1/models" },
   adminAccounts: { method: "GET", path: "/admin/accounts" },
+  adminAccountsUsageRefresh: {
+    method: "POST",
+    path: "/admin/accounts/usage/refresh",
+  },
   adminStats: { method: "GET", path: "/admin/stats" },
   adminApiKeys: { method: "GET", path: "/admin/api-keys" },
   adminApiKeysCreate: { method: "POST", path: "/admin/api-keys" },
@@ -28,6 +32,7 @@ const PRINT_ORDER: RouteDescriptor[] = [
   ROUTES.adminApiKeysDisable,
   ROUTES.adminReload,
   ROUTES.adminAccounts,
+  ROUTES.adminAccountsUsageRefresh,
   ROUTES.adminStats,
   ROUTES.health,
 ];
