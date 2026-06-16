@@ -13,7 +13,15 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import { presentStatsSnapshot } from "./stats/presenter";
 import { ROUTES } from "./routes";
+import {
+  addTraceStep,
+  makeTraceId,
+  RequestTraceContext,
+  TraceRecorder,
+} from "./observability/trace";
+import { generateDailyReport } from "./observability/report";
 
 function bumpFixedWindowCounter(
   counters: Map<string, { count: number; resetAt: number }>,
@@ -37,6 +45,12 @@ export function createServer(
   registry: ProviderRegistry,
   apiKeyRegistry: ApiKeyRegistry,
   statsRecorder?: StatsRecorder,
+  traceRecorder?: TraceRecorder,
+  sendMail?: (
+    subject: string,
+    body: string,
+    recipients: string[],
+  ) => Promise<void>,
 ): express.Application {
   const app = express();
   const ipRateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -63,6 +77,83 @@ export function createServer(
 
   app.use(express.json({ limit: config["body-limit"] }));
 
+  const traceStartMiddleware: express.RequestHandler = (req, res, next) => {
+    if (!traceRecorder?.enabled) return next();
+    const traceId = makeTraceId(req.headers["x-request-id"]);
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const ua = (req.headers["user-agent"] as string) || "";
+    res.setHeader("x-request-id", traceId);
+    res.locals.trace = {
+      traceId,
+      startedAt: performance.now(),
+      startedAtIso: new Date().toISOString(),
+      endpoint: `${req.method} ${req.baseUrl}${req.path}`,
+      method: req.method,
+      path: `${req.baseUrl}${req.path}`,
+      ip,
+      ua,
+      model: null,
+      provider: null,
+      accountEmailHash: null,
+      routing: {},
+      cache: {
+        sessionRoute: "none",
+      },
+      steps: [],
+      attempts: [],
+      failureKind: null,
+      usage: null,
+    } satisfies RequestTraceContext;
+    let recorded = false;
+    const recordTrace = (override?: {
+      status: "success" | "failure";
+      statusCode: number;
+      failureKind: string | null;
+    }) => {
+      if (recorded) return;
+      recorded = true;
+      const ctx = res.locals.trace as RequestTraceContext | undefined;
+      if (!ctx) return;
+      const latencyMs = Date.now() - Date.parse(ctx.startedAtIso);
+      const status =
+        override?.status ??
+        (res.statusCode >= 200 && res.statusCode < 300 ? "success" : "failure");
+      traceRecorder.record({
+        traceId: ctx.traceId,
+        endpoint: ctx.endpoint,
+        method: ctx.method,
+        path: ctx.path,
+        apiKeyHash: ctx.apiKeyHash,
+        apiKeyName: ctx.apiKeyName,
+        ip: ctx.ip,
+        ua: ctx.ua,
+        model: ctx.model,
+        provider: ctx.provider,
+        accountEmailHash: ctx.accountEmailHash,
+        status,
+        failureKind: override?.failureKind ?? ctx.failureKind,
+        statusCode: override?.statusCode ?? res.statusCode,
+        latencyMs,
+        routing: ctx.routing,
+        cache: ctx.cache,
+        steps: [...ctx.steps, { name: "total", ms: latencyMs }],
+        attempts: ctx.attempts,
+        usage: ctx.usage,
+      });
+    };
+    res.on("finish", () => recordTrace());
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        recordTrace({
+          status: "failure",
+          statusCode: 499,
+          failureKind: "client_disconnect",
+        });
+      }
+    });
+    next();
+  };
+
   if (isDebugLevel(config.debug, "verbose")) {
     app.use((req, res, next) => {
       const startedAt = Date.now();
@@ -86,8 +177,9 @@ export function createServer(
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, x-api-key",
+      "Content-Type, Authorization, x-api-key, x-request-id",
     );
+    res.setHeader("Access-Control-Expose-Headers", "x-request-id");
     if (_req.method === "OPTIONS") {
       res.sendStatus(204);
       return;
@@ -96,10 +188,14 @@ export function createServer(
   });
 
   // Rate limiting middleware
+  app.use("/v1", traceStartMiddleware);
   app.use("/v1", (req, res, next) => {
+    const startedAt = performance.now();
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     const result = bumpFixedWindowCounter(ipRateLimitMap, ip, 60 * 1000, 60);
+    addTraceStep(res as any, "ip_rate_limit", startedAt);
     if (!result.allowed) {
+      if (res.locals.trace) res.locals.trace.failureKind = "rate_limit";
       res.status(429).json({ error: { message: "Too many requests" } });
       return;
     }
@@ -109,13 +205,18 @@ export function createServer(
   // API key auth middleware — accepts both OpenAI style (Authorization: Bearer)
   // and Anthropic style (x-api-key), so Claude Code and OpenAI clients both work
   const requireApiKey: express.RequestHandler = (req, res, next) => {
+    const startedAt = performance.now();
     const key = extractApiKey(req.headers);
     if (!key) {
+      addTraceStep(res as any, "auth", startedAt);
+      if (res.locals.trace) res.locals.trace.failureKind = "auth";
       res.status(401).json({ error: { message: "Missing API key" } });
       return;
     }
     const auth = apiKeyRegistry.authenticate(key);
     if (!auth) {
+      addTraceStep(res as any, "auth", startedAt);
+      if (res.locals.trace) res.locals.trace.failureKind = "auth";
       res.status(403).json({ error: { message: "Invalid API key" } });
       return;
     }
@@ -127,6 +228,11 @@ export function createServer(
     res.locals.authApiKeyName = auth.record.name || auth.record.id;
     res.locals.authApiKeyTier = auth.record.tier;
     res.locals.authApiKeyRecord = auth.record;
+    if (res.locals.trace) {
+      res.locals.trace.apiKeyHash = res.locals.authApiKeyHash;
+      res.locals.trace.apiKeyName = res.locals.authApiKeyName;
+    }
+    addTraceStep(res as any, "auth", startedAt);
     if (statsRecorder) {
       const ip = req.ip || req.socket.remoteAddress || "unknown";
       const ua = (req.headers["user-agent"] as string) || "";
@@ -152,9 +258,13 @@ export function createServer(
     res,
     next,
   ) => {
+    const startedAt = performance.now();
     const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
     const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
-    if (!apiKeyHash || !apiKeyTier) return next();
+    if (!apiKeyHash || !apiKeyTier) {
+      addTraceStep(res as any, "api_key_rate_limit", startedAt);
+      return next();
+    }
 
     const limits = apiKeyRegistry.resolveLimits(apiKeyTier);
     const result = bumpFixedWindowCounter(
@@ -163,11 +273,13 @@ export function createServer(
       5 * 60 * 60 * 1000,
       limits.maxRequests5h,
     );
+    addTraceStep(res as any, "api_key_rate_limit", startedAt);
     if (result.allowed) return next();
 
     if (res.locals.stats) {
       res.locals.stats.failureKind = "rate_limit";
     }
+    if (res.locals.trace) res.locals.trace.failureKind = "rate_limit";
     const retryAfterSeconds = Math.max(
       1,
       Math.ceil((result.resetAt - Date.now()) / 1000),
@@ -186,16 +298,22 @@ export function createServer(
     res,
     next,
   ) => {
+    const startedAt = performance.now();
     const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
     const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
-    if (!apiKeyHash || !apiKeyTier) return next();
+    if (!apiKeyHash || !apiKeyTier) {
+      addTraceStep(res as any, "api_key_concurrency", startedAt);
+      return next();
+    }
 
     const limits = apiKeyRegistry.resolveLimits(apiKeyTier);
     const current = apiKeyConcurrencyMap.get(apiKeyHash) || 0;
     if (current >= limits.concurrency) {
+      addTraceStep(res as any, "api_key_concurrency", startedAt);
       if (res.locals.stats) {
         res.locals.stats.failureKind = "rate_limit";
       }
+      if (res.locals.trace) res.locals.trace.failureKind = "rate_limit";
       res.setHeader("Retry-After", "1");
       res.status(429).json({
         error: {
@@ -217,6 +335,7 @@ export function createServer(
     };
     res.on("finish", release);
     res.on("close", release);
+    addTraceStep(res as any, "api_key_concurrency", startedAt);
     next();
   };
 
@@ -308,12 +427,25 @@ export function createServer(
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
   app.get(ROUTES.adminStats.path, (_req, res) => {
     if (!statsRecorder) {
+      const locale = _req.query.locale;
+      if (locale === "zh-CN") {
+        res.json({ 已启用: false });
+        return;
+      }
       res.json({ enabled: false });
+      return;
+    }
+    const generatedAt = new Date().toISOString();
+    const locale = _req.query.locale;
+    if (locale === "zh-CN") {
+      res.json({
+        ...presentStatsSnapshot(statsRecorder.getSnapshot(), generatedAt),
+      });
       return;
     }
     res.json({
       ...statsRecorder.getSnapshot(),
-      generated_at: new Date().toISOString(),
+      generated_at: generatedAt,
     });
   });
 
@@ -487,6 +619,36 @@ export function createServer(
       reloaded,
       generated_at: new Date().toISOString(),
     });
+  });
+
+  app.post(ROUTES.adminDailyReport.path, async (req, res) => {
+    if (!traceRecorder) {
+      res.status(503).json({ error: { message: "Observability is disabled" } });
+      return;
+    }
+    const date = req.body?.date;
+    const sendEmail = req.body?.sendEmail !== false;
+    if (typeof date !== "string") {
+      res.status(400).json({ error: { message: "date is required" } });
+      return;
+    }
+    try {
+      const result = await generateDailyReport(
+        config,
+        traceRecorder,
+        { date, sendEmail },
+        sendMail,
+      );
+      traceRecorder.prune();
+      res.json({
+        date: result.date,
+        filePath: result.filePath,
+        emailed: result.emailed,
+        markdown: result.markdown,
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: { message: err?.message || String(err) } });
+    }
   });
 
   app.use("/v1", requireApiKey);

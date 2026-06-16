@@ -1,6 +1,7 @@
 import { ProviderId } from "../auth/types";
 import { UsageData } from "../accounts/manager";
 import { StatsAppender, replayStatsEvents, statsFilePath } from "./storage";
+import { tagTraceUsage } from "../observability/trace";
 
 /**
  * One row in the JSONL stats log. Keep field names short — the file grows
@@ -26,7 +27,7 @@ export interface StatsEvent {
   usage: UsageData | null;
 }
 
-interface BaseBucket {
+export interface BaseBucket {
   requests: number;
   successes: number;
   failures: number;
@@ -202,7 +203,8 @@ export class StatsRecorder {
     if (!shouldRecordStatsEvent(ev)) return;
     applyBaseDelta(this.totals, ev);
 
-    const clientKey = ev.apiKeyName || this.apiKeyNamesByHash.get(ev.apiKeyHash);
+    const clientKey =
+      ev.apiKeyName || this.apiKeyNamesByHash.get(ev.apiKeyHash);
     if (clientKey) {
       let cb = this.byClient.get(clientKey);
       if (!cb) {
@@ -269,6 +271,8 @@ export function tagStatsModel(
 }
 
 export function tagStatsUsage(res: ResLike, usage: UsageData): void {
-  if (!res.locals.stats) return;
-  res.locals.stats.usage = usage;
+  if (res.locals.stats) {
+    res.locals.stats.usage = usage;
+  }
+  tagTraceUsage(res, usage);
 }

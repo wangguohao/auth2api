@@ -1,4 +1,5 @@
 import { Response as ExpressResponse } from "express";
+import crypto from "crypto";
 import {
   AccountFailureKind,
   AccountManager,
@@ -8,6 +9,13 @@ import {
 } from "../accounts/manager";
 import { ProviderId } from "../auth/types";
 import { Config, isDebugLevel } from "../config";
+import {
+  addTraceAttempt,
+  addTraceStep,
+  mergeTraceCache,
+  mergeTraceRouting,
+  roundMs,
+} from "../observability/trace";
 
 export const MAX_RETRIES = 3;
 export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -49,6 +57,10 @@ function tagStatsFailure(
   if (!ctx) return;
   ctx.failureKind = failureKind;
   if (provider) ctx.provider = provider;
+}
+
+function hashIdentifier(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 export function accountUnavailable(
@@ -142,11 +154,22 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const accountSelectStartedAt = performance.now();
       const result = manager.getNextAccount(options.selectionContext);
+      addTraceStep(resp as any, "account_select", accountSelectStartedAt);
+      if (result.decision) {
+        mergeTraceRouting(resp as any, {
+          accountReason: result.decision.reason,
+        });
+        mergeTraceCache(resp as any, {
+          sessionRoute: result.decision.sessionCache,
+        });
+      }
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
       }
       const account = result.account;
+      const accountEmailHash = hashIdentifier(account.token.email);
       manager.recordAttempt(account.token.email);
       // Surface upstream account attribution to the per-request stats slot
       // (set by server.ts requireApiKey middleware). Done here so failure
@@ -157,13 +180,28 @@ export async function proxyWithRetry(
         statsCtx.accountEmail = account.token.email;
         statsCtx.provider = manager.provider;
       }
+      const traceCtx = (resp.locals as any)?.trace;
+      if (traceCtx) {
+        traceCtx.accountEmailHash = accountEmailHash;
+        traceCtx.routing.accountEmailHash = accountEmailHash;
+      }
 
       let upstream: Response;
+      const upstreamStartedAt = performance.now();
       try {
         upstream = await options.upstream(account, requestController.signal);
+        addTraceStep(resp as any, "upstream_fetch_headers", upstreamStartedAt);
       } catch (err: any) {
+        const upstreamMs = roundMs(performance.now() - upstreamStartedAt);
         if (requestController.signal.aborted) return;
         tagStatsFailure(resp, "network", manager.provider);
+        addTraceAttempt(resp as any, {
+          attempt: attempt + 1,
+          provider: manager.provider,
+          accountEmailHash,
+          failureKind: "network",
+          upstreamMs,
+        });
         manager.recordFailure(account.token.email, "network", err.message);
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
@@ -183,9 +221,19 @@ export async function proxyWithRetry(
       }
 
       if (upstream.ok) {
+        addTraceAttempt(resp as any, {
+          attempt: attempt + 1,
+          provider: manager.provider,
+          accountEmailHash,
+          statusCode: upstream.status,
+          failureKind: null,
+          upstreamMs: roundMs(performance.now() - upstreamStartedAt),
+        });
         tagStatsFailure(resp, null, manager.provider);
         try {
+          const successStartedAt = performance.now();
           await options.success(upstream, account);
+          addTraceStep(resp as any, "success_handler", successStartedAt);
         } catch (err: any) {
           if (requestController.signal.aborted || resp.destroyed) return;
           tagStatsFailure(resp, "handler_error", manager.provider);
@@ -215,6 +263,20 @@ export async function proxyWithRetry(
         manager.provider,
       );
       lastRetryAfter = upstream.headers.get("retry-after");
+      addTraceAttempt(resp as any, {
+        attempt: attempt + 1,
+        provider: manager.provider,
+        accountEmailHash,
+        statusCode: lastStatus,
+        failureKind:
+          lastStatus >= 400 && lastStatus < 500
+            ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
+              ? classifyFailure(lastStatus)
+              : "client_error"
+            : classifyFailure(lastStatus),
+        upstreamMs: roundMs(performance.now() - upstreamStartedAt),
+        retryAfter: lastRetryAfter,
+      });
       (manager as any).observeRetryAfter?.(account.token.email, lastRetryAfter);
       try {
         lastErrBody = await upstream.text();

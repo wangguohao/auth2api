@@ -5,6 +5,11 @@ import { ProviderRegistry } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
+  markTraceModel,
+  mergeTraceCache,
+  mergeTraceRouting,
+} from "../observability/trace";
+import {
   resolveModel,
   openaiToAnthropic,
   anthropicToOpenai,
@@ -518,7 +523,17 @@ export function createChatCompletionsHandler(
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const route = registry.forModelWithDecision(model);
+      const provider = route.provider;
+      mergeTraceRouting(resp, {
+        model,
+        resolvedModel: route.decision.resolvedModel,
+        provider: provider.id,
+        providerReason: route.decision.reason,
+      });
+      mergeTraceCache(resp, {
+        modelRoute: route.decision.cacheHit ? "hit" : "miss",
+      });
       const selectionContext = {
         sessionKey: buildSessionBindingKey(
           resp.locals.authApiKeyHash,
@@ -529,6 +544,7 @@ export function createChatCompletionsHandler(
         apiKeyTier: resp.locals.authApiKeyRecord?.tier,
       };
       tagStatsModel(resp, model, provider.id);
+      markTraceModel(resp, model, provider.id);
 
       // Cursor's wire protocol is closer to the OpenAI Responses API than to
       // Anthropic Messages, so for Cursor we skip the OpenAI->Anthropic
@@ -647,7 +663,17 @@ export function createResponsesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const route = registry.forModelWithDecision(model);
+      const provider = route.provider;
+      mergeTraceRouting(resp, {
+        model,
+        resolvedModel: route.decision.resolvedModel,
+        provider: provider.id,
+        providerReason: route.decision.reason,
+      });
+      mergeTraceCache(resp, {
+        modelRoute: route.decision.cacheHit ? "hit" : "miss",
+      });
       const selectionContext = {
         sessionKey: buildSessionBindingKey(
           resp.locals.authApiKeyHash,
@@ -658,6 +684,7 @@ export function createResponsesHandler(
         apiKeyTier: resp.locals.authApiKeyRecord?.tier,
       };
       tagStatsModel(resp, model, provider.id);
+      markTraceModel(resp, model, provider.id);
 
       // The client-requested streaming intent is captured BEFORE we
       // normalize the upstream body — codex/cursor each force

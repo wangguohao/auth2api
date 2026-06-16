@@ -14,6 +14,9 @@ import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
 import { installFetchKeepAliveAgent } from "./utils/fetch-agent";
+import { TraceRecorder } from "./observability/trace";
+import { createMailSender } from "./observability/mail";
+import { DailyReportScheduler } from "./observability/scheduler";
 
 installFetchKeepAliveAgent();
 
@@ -204,8 +207,24 @@ async function startServer(): Promise<void> {
     statsRecorder = new StatsRecorder(apiKeys.getNameByHash());
     statsRecorder.start(authDir);
   }
+  let traceRecorder: TraceRecorder | undefined;
+  let reportScheduler: DailyReportScheduler | undefined;
+  const sendMail = createMailSender(config.mail);
+  if (config.observability.enabled && config.observability.trace.enabled) {
+    traceRecorder = new TraceRecorder(authDir, config.observability);
+    traceRecorder.prune();
+    reportScheduler = new DailyReportScheduler(config, traceRecorder, sendMail);
+    reportScheduler.start();
+  }
 
-  const app = createServer(config, registry, apiKeys, statsRecorder);
+  const app = createServer(
+    config,
+    registry,
+    apiKeys,
+    statsRecorder,
+    traceRecorder,
+    sendMail,
+  );
   const host = config.host || "127.0.0.1";
   const port = config.port;
 
@@ -223,13 +242,12 @@ async function startServer(): Promise<void> {
       p.manager.stopStatsLogger();
       p.manager.stopUsageRefresher();
     }
-    if (statsRecorder) {
-      // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
-      statsRecorder.stop().finally(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref();
-      return;
-    }
-    process.exit(0);
+    reportScheduler?.stop();
+    Promise.all([
+      statsRecorder?.stop() ?? Promise.resolve(),
+      traceRecorder?.close() ?? Promise.resolve(),
+    ]).finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
   });
 }
 

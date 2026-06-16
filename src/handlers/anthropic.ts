@@ -8,6 +8,11 @@ import { handleStreamingResponse } from "../upstream/streaming";
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
+  markTraceModel,
+  mergeTraceCache,
+  mergeTraceRouting,
+} from "../observability/trace";
+import {
   anthropicToResponsesRequest,
   responsesToAnthropicMessage,
   responsesSSEToAnthropic,
@@ -192,7 +197,17 @@ export function createMessagesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const route = registry.forModelWithDecision(model);
+      const provider = route.provider;
+      mergeTraceRouting(resp, {
+        model,
+        resolvedModel: route.decision.resolvedModel,
+        provider: provider.id,
+        providerReason: route.decision.reason,
+      });
+      mergeTraceCache(resp, {
+        modelRoute: route.decision.cacheHit ? "hit" : "miss",
+      });
       const selectionContext = {
         sessionKey: buildSessionBindingKey(
           resp.locals.authApiKeyHash,
@@ -203,6 +218,7 @@ export function createMessagesHandler(
         apiKeyTier: resp.locals.authApiKeyRecord?.tier,
       };
       tagStatsModel(resp, model, provider.id);
+      markTraceModel(resp, model, provider.id);
 
       // Codex's upstream is the OpenAI Responses API; route /v1/messages
       // through a dedicated translator path that converts Anthropic
@@ -293,7 +309,17 @@ export function createCountTokensHandler(
     try {
       const body = req.body;
       const model = resolveModel(body?.model || "claude-sonnet-4-6");
-      const provider = registry.forModel(model);
+      const route = registry.forModelWithDecision(model);
+      const provider = route.provider;
+      mergeTraceRouting(resp, {
+        model,
+        resolvedModel: route.decision.resolvedModel,
+        provider: provider.id,
+        providerReason: route.decision.reason,
+      });
+      mergeTraceCache(resp, {
+        modelRoute: route.decision.cacheHit ? "hit" : "miss",
+      });
       const selectionContext = {
         sessionKey: buildSessionBindingKey(
           resp.locals.authApiKeyHash,
@@ -304,6 +330,7 @@ export function createCountTokensHandler(
         apiKeyTier: resp.locals.authApiKeyRecord?.tier,
       };
       tagStatsModel(resp, model, provider.id);
+      markTraceModel(resp, model, provider.id);
 
       if (!provider.callCountTokens) {
         resp.status(501).json({

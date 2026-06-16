@@ -1316,6 +1316,7 @@ function withFetchStub(
 test("fetchCodexUsage maps wham usage buckets", async () => {
   const restore = withFetchStub(async (_input, init) => {
     assert.equal(init?.method, "GET");
+    assert.ok(init?.signal);
     assert.equal(
       (init?.headers as Record<string, string>).Authorization,
       "Bearer access-token",
@@ -1424,6 +1425,37 @@ test("AccountManager refreshUsage updates usage snapshot fields", async () => {
     const accountSnap = manager.getSnapshots()[0].usage!;
     assert.equal(accountSnap.status, "success");
     assert.equal(accountSnap.lastWeeklyRefreshAt, snap.lastWeeklyRefreshAt);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("AccountManager addAccount starts usage refresher for newly added account", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("not used");
+      },
+      usageRefresh: async () => ({
+        source: "test",
+        buckets: [],
+      }),
+    });
+    assert.equal((manager as any).usageTimer, null);
+
+    manager.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "usage@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct",
+      provider: "codex",
+    });
+
+    assert.ok((manager as any).usageTimer);
+    manager.stopUsageRefresher();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -1,5 +1,6 @@
 import { Response as ExpressResponse } from "express";
 import { UsageData } from "../accounts/manager";
+import { tagTraceUsage } from "../observability/trace";
 
 /**
  * Read an upstream Response as a stream of SSE `(event, data)` pairs.
@@ -235,6 +236,7 @@ export async function handleStreamingResponse(
   if (completed) {
     const ctx = (resp.locals as any)?.stats;
     if (ctx) ctx.usage = usage;
+    tagTraceUsage(resp as any, usage);
   }
 
   return { completed, clientDisconnected, usage };

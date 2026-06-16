@@ -340,6 +340,9 @@ export class AccountManager {
       this.accounts.set(token.email, this.createAccountState(token));
       this.accountOrder.push(token.email);
     }
+    if (this.accounts.size > 0) {
+      this.startUsageRefresher();
+    }
     console.log(`[${this.provider}] loaded ${this.accounts.size} account(s)`);
   }
 
@@ -392,6 +395,7 @@ export class AccountManager {
       if (!existing) {
         this.accounts.set(token.email, this.createAccountState(token));
         this.accountOrder.push(token.email);
+        this.startUsageRefresher();
         stats.added.push(token.email);
         continue;
       }
@@ -450,6 +454,7 @@ export class AccountManager {
       state.lastRefreshAt = new Date().toISOString();
       this.accounts.set(token.email, state);
       this.accountOrder.push(token.email);
+      this.startUsageRefresher();
     }
 
     saveToken(this.authDir, token);

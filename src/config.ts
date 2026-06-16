@@ -49,6 +49,32 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+export interface ObservabilityConfig {
+  enabled: boolean;
+  trace: {
+    enabled: boolean;
+    retentionDays: number;
+  };
+  report: {
+    enabled: boolean;
+    scheduleHour: number;
+    timezone: string;
+    retentionDays: number;
+    recipients: string[];
+  };
+}
+
+export interface MailConfig {
+  smtp?: {
+    host: string;
+    port: number;
+    secure: boolean;
+    user?: string;
+    pass?: string;
+    from: string;
+  };
+}
+
 export interface ApiKeyTierLimitSpec {
   concurrency?: number;
   "max-requests-5h"?: number;
@@ -85,6 +111,8 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  observability: ObservabilityConfig;
+  mail: MailConfig;
   debug: DebugMode;
 }
 
@@ -129,6 +157,21 @@ const DEFAULT_RAW: RawConfig = {
   stats: {
     enabled: true,
   },
+  observability: {
+    enabled: false,
+    trace: {
+      enabled: true,
+      retentionDays: 14,
+    },
+    report: {
+      enabled: false,
+      scheduleHour: 2,
+      timezone: "Asia/Shanghai",
+      retentionDays: 14,
+      recipients: [],
+    },
+  },
+  mail: {},
   debug: "off",
 };
 
@@ -171,7 +214,8 @@ export function loadConfig(configPath?: string): Config {
     const parsed = yaml.load(content) as Partial<RawConfig>;
     const { ["api-keys"]: _legacyApiKeys, ...parsedWithoutLegacyKeys } =
       parsed as Partial<RawConfig> & { "api-keys"?: unknown };
-    const parsedTierLimits = (parsed["api-key-tier-limits"] || {}) as Partial<ApiKeyTierLimitsConfig>;
+    const parsedTierLimits = (parsed["api-key-tier-limits"] ||
+      {}) as Partial<ApiKeyTierLimitsConfig>;
     const defaultTierLimits = DEFAULT_RAW["api-key-tier-limits"]!;
     raw = {
       ...DEFAULT_RAW,
@@ -181,10 +225,14 @@ export function loadConfig(configPath?: string): Config {
         ...(parsed["api-key-rate-limit"] || {}),
         overrides: {
           ...(DEFAULT_RAW["api-key-rate-limit"].overrides || {}),
-          ...((parsed["api-key-rate-limit"]?.overrides as Record<
-            string,
-            Partial<Pick<ApiKeyRateLimitConfig, "window-ms" | "max-requests">>
-          > | undefined) || {}),
+          ...((parsed["api-key-rate-limit"]?.overrides as
+            | Record<
+                string,
+                Partial<
+                  Pick<ApiKeyRateLimitConfig, "window-ms" | "max-requests">
+                >
+              >
+            | undefined) || {}),
         },
       },
       "api-key-tier-limits": {
@@ -206,10 +254,49 @@ export function loadConfig(configPath?: string): Config {
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
+      observability: {
+        ...DEFAULT_RAW.observability,
+        ...(parsed.observability || {}),
+        trace: {
+          ...DEFAULT_RAW.observability.trace,
+          ...(parsed.observability?.trace || {}),
+        },
+        report: {
+          ...DEFAULT_RAW.observability.report,
+          ...(parsed.observability?.report || {}),
+        },
+      },
+      mail: {
+        ...DEFAULT_RAW.mail,
+        ...(parsed.mail || {}),
+        smtp: parsed.mail?.smtp
+          ? {
+              ...parsed.mail.smtp,
+            }
+          : DEFAULT_RAW.mail.smtp,
+      },
     };
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
+  raw.observability.trace.retentionDays = normalizePositiveInteger(
+    raw.observability.trace.retentionDays,
+    DEFAULT_RAW.observability.trace.retentionDays,
+  );
+  raw.observability.report.retentionDays = normalizePositiveInteger(
+    raw.observability.report.retentionDays,
+    DEFAULT_RAW.observability.report.retentionDays,
+  );
+  raw.observability.report.scheduleHour = Math.min(
+    23,
+    Math.max(
+      0,
+      normalizeNonNegativeInteger(
+        raw.observability.report.scheduleHour,
+        DEFAULT_RAW.observability.report.scheduleHour,
+      ),
+    ),
+  );
 
   // Auto-generate bootstrap admin key if missing.
   if (!raw["bootstrap-admin-key"]) {
@@ -223,6 +310,16 @@ export function loadConfig(configPath?: string): Config {
   }
 
   return { ...raw };
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.floor(value));
+}
+
+function normalizeNonNegativeInteger(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
 }
 
 export function resolveApiKeyRateLimit(
@@ -251,7 +348,10 @@ export function resolveTierLimit(
   const concurrencyMultiplier = spec.concurrencyMultiplier ?? 2;
   const requestsMultiplier = spec["max-requests-multiplier"] ?? 2;
   return {
-    concurrency: Math.max(1, Math.round(liteConcurrency * concurrencyMultiplier)),
+    concurrency: Math.max(
+      1,
+      Math.round(liteConcurrency * concurrencyMultiplier),
+    ),
     maxRequests5h: Math.max(1, Math.round(liteRequests * requestsMultiplier)),
   };
 }

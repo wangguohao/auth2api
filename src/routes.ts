@@ -16,6 +16,7 @@ export const ROUTES = {
   adminApiKeysEnable: { method: "POST", path: "/admin/api-keys/:id/enable" },
   adminApiKeysDisable: { method: "POST", path: "/admin/api-keys/:id/disable" },
   adminReload: { method: "POST", path: "/admin/reload" },
+  adminDailyReport: { method: "POST", path: "/admin/reports/daily" },
 } as const;
 
 type RouteDescriptor = (typeof ROUTES)[keyof typeof ROUTES];
@@ -31,6 +32,7 @@ const PRINT_ORDER: RouteDescriptor[] = [
   ROUTES.adminApiKeysEnable,
   ROUTES.adminApiKeysDisable,
   ROUTES.adminReload,
+  ROUTES.adminDailyReport,
   ROUTES.adminAccounts,
   ROUTES.adminAccountsUsageRefresh,
   ROUTES.adminStats,
@@ -38,7 +40,7 @@ const PRINT_ORDER: RouteDescriptor[] = [
 ];
 
 export function getRouteLines(includeStats: boolean): string[] {
-  return PRINT_ORDER.filter((route) => includeStats || route !== ROUTES.adminStats).map(
-    (route) => `  ${route.method.padEnd(4)} ${route.path}`,
-  );
+  return PRINT_ORDER.filter(
+    (route) => includeStats || route !== ROUTES.adminStats,
+  ).map((route) => `  ${route.method.padEnd(4)} ${route.path}`);
 }

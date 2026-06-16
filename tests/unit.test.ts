@@ -1366,6 +1366,7 @@ test("anthropicSSEToResponses returns empty for unknown events", () => {
 // ══════════════════════════════════════════════════
 
 import { StatsRecorder, StatsEvent } from "../src/stats/recorder";
+import { presentStatsSnapshot } from "../src/stats/presenter";
 import { replayStatsEvents, statsFilePath } from "../src/stats/storage";
 import { createServer } from "../src/server";
 import { ApiKeyRegistry } from "../src/auth/api-key-registry";
@@ -1520,6 +1521,82 @@ test("StatsRecorder omits byClient for unmapped legacy hashes", () => {
   assert.deepEqual(snapshot.byClient, {});
 });
 
+test("presentStatsSnapshot formats chinese labels, compact tokens, and datetime", () => {
+  const snapshot = {
+    byClient: {
+      client: {
+        requests: 12,
+        successes: 11,
+        failures: 1,
+        totalInputTokens: 12_345,
+        totalOutputTokens: 2_300_000,
+        totalCacheCreationInputTokens: 0,
+        totalCacheReadInputTokens: 987,
+        totalReasoningOutputTokens: 21_500,
+        totalLatencyMs: 4_200,
+        firstSeenAt: "2026-06-16T01:02:03.000Z",
+        lastSeenAt: "2026-06-16T04:05:06.000Z",
+        name: "client",
+        lastIp: "127.0.0.1",
+        lastUa: "ua",
+      },
+    },
+    byAccount: {},
+    byApi: {},
+    totals: {
+      requests: 12,
+      successes: 11,
+      failures: 1,
+      totalInputTokens: 12_345,
+      totalOutputTokens: 2_300_000,
+      totalCacheCreationInputTokens: 0,
+      totalCacheReadInputTokens: 987,
+      totalReasoningOutputTokens: 21_500,
+      totalLatencyMs: 4_200,
+      firstSeenAt: "2026-06-16T01:02:03.000Z",
+      lastSeenAt: "2026-06-16T04:05:06.000Z",
+    },
+  };
+
+  const presented = presentStatsSnapshot(
+    snapshot as any,
+    "2026-06-16T08:09:10.000Z",
+  );
+  assert.equal(presented.按客户端.client.输入Token, "12.3k");
+  assert.equal(presented.按客户端.client.输出Token, "2.3m");
+  assert.equal(presented.按客户端.client.推理输出Token, "21.5k");
+  assert.equal(presented.按客户端.client.总耗时, "4.2s");
+  assert.equal(presented.按客户端.client.首次时间, "2026-06-16 09:02:03");
+  assert.equal(presented.生成时间, "2026-06-16 16:09:10");
+});
+
+test("presentStatsSnapshot promotes compact token units near thresholds", () => {
+  const snapshot = {
+    byClient: {},
+    byAccount: {},
+    byApi: {},
+    totals: {
+      requests: 1,
+      successes: 1,
+      failures: 0,
+      totalInputTokens: 999_950,
+      totalOutputTokens: 999_950_000,
+      totalCacheCreationInputTokens: 0,
+      totalCacheReadInputTokens: 0,
+      totalReasoningOutputTokens: 0,
+      totalLatencyMs: 10,
+      firstSeenAt: "2026-06-16T00:00:00.000Z",
+      lastSeenAt: "2026-06-16T00:00:00.000Z",
+    },
+  };
+  const presented = presentStatsSnapshot(
+    snapshot as any,
+    "2026-06-16T00:00:00.000Z",
+  );
+  assert.equal(presented.汇总.输入Token, "1m");
+  assert.equal(presented.汇总.输出Token, "1b");
+});
+
 test("createServer stats does not record admin endpoints", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
@@ -1646,6 +1723,126 @@ test("createServer supports manual account usage refresh", async () => {
     assert.equal(body.refreshed.anthropic, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer admin stats returns chinese fields and formatted values", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const recorder = new StatsRecorder();
+  recorder.start(tmp);
+  recorder.applyEvent(
+    makeStatsEvent({
+      apiKeyName: "client-a",
+      provider: "codex",
+      accountEmail: "a@example.com",
+      usage: {
+        inputTokens: 12_345,
+        outputTokens: 2_300_000,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 987,
+        reasoningOutputTokens: 21_500,
+      },
+    }),
+  );
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {} as any,
+    apiKeys,
+    recorder,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/stats?locale=zh-CN`,
+      {
+      headers: { Authorization: "Bearer sk-test" },
+      },
+    );
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(body.byClient, undefined);
+    assert.equal(body.按客户端["client-a"].输入Token, "12.3k");
+    assert.equal(body.按客户端["client-a"].输出Token, "2.3m");
+    assert.equal(body.按客户端["client-a"].缓存命中输入Token, "987");
+    assert.match(
+      body.按客户端["client-a"].最后时间,
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,
+    );
+    assert.match(body.生成时间, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await recorder.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer admin stats keeps english schema by default", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const recorder = new StatsRecorder();
+  recorder.start(tmp);
+  recorder.applyEvent(
+    makeStatsEvent({
+      apiKeyName: "client-a",
+    }),
+  );
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {} as any,
+    apiKeys,
+    recorder,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(`http://127.0.0.1:${port}/admin/stats`, {
+      headers: { Authorization: "Bearer sk-test" },
+    });
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(typeof body.generated_at, "string");
+    assert.equal(body.生成时间, undefined);
+    assert.equal(body.byClient["client-a"].name, "client-a");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await recorder.stop();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

@@ -26,9 +26,9 @@ body-limit: "200mb"
 
 # Upstream request timeouts
 timeouts:
-  messages-ms: 120000         # non-stream /v1/messages timeout
-  stream-messages-ms: 600000  # stream /v1/messages timeout, suitable for Claude Code long tasks
-  count-tokens-ms: 30000      # /v1/messages/count_tokens timeout
+  messages-ms: 120000 # non-stream /v1/messages timeout
+  stream-messages-ms: 600000 # stream /v1/messages timeout, suitable for Claude Code long tasks
+  count-tokens-ms: 30000 # /v1/messages/count_tokens timeout
 
 # Per-request call statistics. Aggregated by:
 #   - client (sha256(api-key))
@@ -38,6 +38,35 @@ timeouts:
 # Query the live snapshot via GET /admin/stats (requires API key).
 stats:
   enabled: true
+
+# Gateway observability. Trace events are appended to:
+#   <auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl
+# Daily reports are saved to:
+#   <auth-dir>/observability/reports/daily-YYYY-MM-DD.md
+observability:
+  enabled: false
+  trace:
+    enabled: true
+    retentionDays: 14
+  report:
+    enabled: false
+    scheduleHour: 2
+    timezone: "Asia/Shanghai"
+    retentionDays: 14
+    recipients:
+      - "ops@example.com"
+
+# SMTP settings for scheduled and manually triggered reports.
+# Prefer an SMTP authorization code / app password over the account password.
+# The built-in sender supports direct TLS SMTP well, e.g. port 465.
+mail:
+  smtp:
+    host: "smtp.example.com"
+    port: 465
+    secure: true
+    user: "report@example.com"
+    pass: "smtp-auth-code"
+    from: "auth2api Report <report@example.com>"
 
 # Debug logging level:
 # off = no extra logs
