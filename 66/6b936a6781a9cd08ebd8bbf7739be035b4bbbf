@@ -1,0 +1,23 @@
+src/index.ts
+  s_425c6a8daa9f0b::t_c04c3db8327485 12,211-213
+src/routes.ts
+  s_425c6a8daa9f0b::t_63a2dc0d9b7714 1-39
+src/server.ts
+  s_425c6a8daa9f0b::t_2eecb7bacf7b88 20,270,294,305,322,329,351,369,392,417,434,437,440,442
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "666b936a6781a9cd08ebd8bbf7739be035b4bbbf",
+  "prompts": {},
+  "sessions": {
+    "s_425c6a8daa9f0b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ece1c-455d-7ee2-98a0-187fdd8a13ac",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    }
+  }
+}
