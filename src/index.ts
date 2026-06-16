@@ -9,6 +9,7 @@ import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
 import { ApiKeyRegistry } from "./auth/api-key-registry";
 import { applyRoutingExtra, parseRoutingExtraArg } from "./auth/routing-extra";
 import { buildRegistry, ProviderRegistry } from "./providers/registry";
+import { getRouteLines } from "./routes";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
@@ -207,14 +208,9 @@ async function startServer(): Promise<void> {
   app.listen(port, host, () => {
     console.log(`auth2api running on http://${host}:${port}`);
     console.log(`Endpoints:`);
-    console.log(`  POST /v1/chat/completions`);
-    console.log(`  POST /v1/responses`);
-    console.log(`  POST /v1/messages`);
-    console.log(`  POST /v1/messages/count_tokens`);
-    console.log(`  GET  /v1/models`);
-    console.log(`  GET  /admin/accounts`);
-    if (statsRecorder) console.log(`  GET  /admin/stats`);
-    console.log(`  GET  /health`);
+    for (const line of getRouteLines(!!statsRecorder)) {
+      console.log(line);
+    }
   });
 
   process.on("SIGINT", () => {

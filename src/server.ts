@@ -17,6 +17,7 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import { ROUTES } from "./routes";
 
 function bumpFixedWindowCounter(
   counters: Map<string, { count: number; resetAt: number }>,
@@ -266,7 +267,7 @@ export function createServer(
   };
 
   // Health check (no account count to avoid info leak)
-  app.get("/health", (_req, res) => {
+  app.get(ROUTES.health.path, (_req, res) => {
     res.json({ status: "ok" });
   });
 
@@ -290,7 +291,7 @@ export function createServer(
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
-  app.get("/admin/stats", (_req, res) => {
+  app.get(ROUTES.adminStats.path, (_req, res) => {
     if (!statsRecorder) {
       res.json({ enabled: false });
       return;
@@ -301,7 +302,7 @@ export function createServer(
     });
   });
 
-  app.get("/admin/accounts", (_req, res) => {
+  app.get(ROUTES.adminAccounts.path, (_req, res) => {
     const providers: Record<
       string,
       { accounts: unknown[]; account_count: number }
@@ -318,14 +319,14 @@ export function createServer(
     });
   });
 
-  app.get("/admin/api-keys", (_req, res) => {
+  app.get(ROUTES.adminApiKeys.path, (_req, res) => {
     res.json({
       keys: apiKeyRegistry.list().map(({ secret, ...rest }) => rest),
       generated_at: new Date().toISOString(),
     });
   });
 
-  app.post("/admin/api-keys", (req, res) => {
+  app.post(ROUTES.adminApiKeysCreate.path, (req, res) => {
     const tier = req.body?.tier as ApiKeyTier | undefined;
     const name = typeof req.body?.name === "string" ? req.body.name : undefined;
     const enabled = req.body?.enabled === undefined ? true : !!req.body.enabled;
@@ -347,7 +348,7 @@ export function createServer(
     });
   });
 
-  app.post("/admin/api-keys/:id/enable", (req, res) => {
+  app.post(ROUTES.adminApiKeysEnable.path, (req, res) => {
     const id = req.params.id;
     try {
       const updated = apiKeyRegistry.updateKeyState(id, true);
@@ -365,7 +366,7 @@ export function createServer(
     }
   });
 
-  app.post("/admin/api-keys/:id/disable", (req, res) => {
+  app.post(ROUTES.adminApiKeysDisable.path, (req, res) => {
     const id = req.params.id;
     try {
       const updated = apiKeyRegistry.updateKeyState(id, false);
@@ -388,7 +389,7 @@ export function createServer(
   // a successful re-auth (see notifyServerReload in src/index.ts), and
   // available for manual use via curl. See AccountManager.reload() for
   // upsert semantics.
-  app.post("/admin/reload", async (_req, res) => {
+  app.post(ROUTES.adminReload.path, async (_req, res) => {
     const reloaded: Record<string, unknown> = {};
     try {
       apiKeyRegistry.reload();
@@ -413,7 +414,7 @@ export function createServer(
   app.use("/v1", statsFinishMiddleware);
   app.use("/v1", apiKeyRateLimitMiddleware);
   app.use("/v1", apiKeyConcurrencyMiddleware);
-  app.get("/v1/models", async (_req, res) => {
+  app.get(ROUTES.v1Models.path, async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();
     const lists = await Promise.all(providers.map((p) => p.listModels()));
@@ -430,15 +431,15 @@ export function createServer(
 
   // Routes — OpenAI compatible
   app.post(
-    "/v1/chat/completions",
+    ROUTES.v1ChatCompletions.path,
     createChatCompletionsHandler(config, registry),
   );
-  app.post("/v1/responses", createResponsesHandler(config, registry));
+  app.post(ROUTES.v1Responses.path, createResponsesHandler(config, registry));
 
   // Routes — Anthropic native passthrough
-  app.post("/v1/messages", createMessagesHandler(config, registry));
+  app.post(ROUTES.v1Messages.path, createMessagesHandler(config, registry));
   app.post(
-    "/v1/messages/count_tokens",
+    ROUTES.v1CountTokens.path,
     createCountTokensHandler(config, registry),
   );
 
