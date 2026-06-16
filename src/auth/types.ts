@@ -15,6 +15,11 @@ export interface TokenData {
   idToken?: string; // codex only
   /** ISO 8601 of last successful refresh (or initial token issuance). */
   lastRefreshAt?: string;
+  /**
+   * Optional routing preference used by codex smart routing. Higher values are
+   * favored when selecting an account.
+   */
+  routing?: RoutingConfig;
   /** Codex only — raw chatgpt_plan_type claim from id_token (free/plus/pro/…). */
   planType?: string;
   /** Cursor only — stable machine id read from Cursor's local storage. */
@@ -29,6 +34,13 @@ export interface TokenData {
   cursorMembershipType?: string;
 }
 
+export type RoutingLevel = "lite" | "pro";
+
+export interface RoutingConfig {
+  bias?: number;
+  level?: RoutingLevel;
+}
+
 export interface TokenStorage {
   access_token: string;
   refresh_token: string;
@@ -39,9 +51,27 @@ export interface TokenStorage {
   account_uuid?: string;
   id_token?: string;
   plan_type?: string;
+  routing?: RoutingConfig;
   cursor_service_machine_id?: string;
   cursor_client_version?: string;
   cursor_config_version?: string;
   cursor_client_id?: string;
   cursor_membership_type?: string;
+}
+
+export type ApiKeyTier = "lite" | "pro" | "admin";
+
+export interface ApiKeyRecord {
+  id: string;
+  secret: string;
+  tier: ApiKeyTier;
+  name?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApiKeyFile {
+  version: 1;
+  keys: ApiKeyRecord[];
 }

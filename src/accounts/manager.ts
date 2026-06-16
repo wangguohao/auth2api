@@ -1,4 +1,10 @@
-import { ProviderId, TokenData } from "../auth/types";
+import {
+  ApiKeyTier,
+  ProviderId,
+  RoutingConfig,
+  RoutingLevel,
+  TokenData,
+} from "../auth/types";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
@@ -53,6 +59,33 @@ export interface UsageData {
   reasoningOutputTokens: number;
 }
 
+export interface AccountSelectionContext {
+  sessionKey?: string;
+  model?: string;
+  path?: string;
+  apiKeyTier?: ApiKeyTier;
+}
+
+type RoutingMode = "default" | "codex-smart";
+type MetadataConfidence = "unknown" | "estimated" | "observed";
+
+interface RoutingMetadata {
+  resetAt: string | null;
+  lastQuotaSyncAt: string | null;
+  lastActiveAt: string | null;
+  nextRefreshAt: number;
+  confidence: MetadataConfidence;
+  windowType: string | null;
+  resetPeriodMs: number | null;
+}
+
+interface SessionBinding {
+  email: string;
+  stickyUntil: number;
+  lastSeenAt: string;
+  model: string | null;
+}
+
 /**
  * Extract usage from a non-streamed JSON response. Handles both Anthropic
  * Messages shape (input_tokens / cache_creation_input_tokens / …) and OpenAI
@@ -100,6 +133,7 @@ interface AccountState {
   totalCacheReadInputTokens: number;
   totalReasoningOutputTokens: number;
   refreshPromise: Promise<boolean> | null;
+  routing: RoutingMetadata;
 }
 
 export interface AccountSnapshot {
@@ -121,8 +155,10 @@ export interface AccountSnapshot {
   totalReasoningOutputTokens: number;
   expiresAt: string;
   refreshing: boolean;
+  routingExtra?: RoutingConfig;
   /** Codex only — chatgpt_plan_type claim ("plus", "pro", "free", …). */
   planType?: string;
+  routing?: RoutingMetadata;
 }
 
 export interface AvailableAccount {
@@ -164,6 +200,7 @@ export interface AccountManagerOptions {
   refresh: RefreshFn;
   /** Default: expires-lead 4h. Codex should pass since-last-refresh 8d. */
   refreshPolicy?: RefreshPolicy;
+  routingMode?: RoutingMode;
 }
 
 export interface ReloadStats {
@@ -204,12 +241,15 @@ export class AccountManager {
   private refreshFn: RefreshFn;
   private refreshPolicy: RefreshPolicy;
   private reloadPromise: Promise<ReloadStats> | null = null;
+  private routingMode: RoutingMode;
+  private sessionBindings: Map<string, SessionBinding> = new Map();
 
   constructor(authDir: string, opts: AccountManagerOptions) {
     this.authDir = authDir;
     this.provider = opts.provider;
     this.refreshFn = opts.refresh;
     this.refreshPolicy = opts.refreshPolicy ?? DEFAULT_REFRESH_POLICY;
+    this.routingMode = opts.routingMode ?? "default";
   }
 
   load(): void {
@@ -336,7 +376,14 @@ export class AccountManager {
    * before rotating to the next one. Rotates early only when the current account
    * enters cooldown (e.g. rate-limited).
    */
-  getNextAccount(): AccountResult {
+  getNextAccount(ctx?: AccountSelectionContext): AccountResult {
+    if (this.routingMode === "codex-smart") {
+      return this.getNextCodexAccount(ctx);
+    }
+    return this.getNextDefaultAccount(ctx);
+  }
+
+  private getNextDefaultAccount(ctx?: AccountSelectionContext): AccountResult {
     const count = this.accountOrder.length;
     if (count === 0) {
       return { account: null, failureKind: null, retryAfterMs: null };
@@ -348,7 +395,10 @@ export class AccountManager {
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (
+        acct.cooldownUntil <= now &&
+        this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+      ) {
         return {
           account: buildAvailableAccount(
             this.authDir,
@@ -366,7 +416,10 @@ export class AccountManager {
       const idx = (startIdx + i) % count;
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (
+        acct.cooldownUntil <= now &&
+        this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+      ) {
         this.lastUsedIndex = idx;
         this.stickyUntil = now + randomStickyDuration();
         return {
@@ -380,11 +433,30 @@ export class AccountManager {
       }
     }
 
+    if (ctx?.apiKeyTier) {
+      const tierEligible = this.accountOrder.filter((email) => {
+        const acct = this.accounts.get(email)!;
+        return this.isAccountAllowedForTier(acct.token.routing?.level, ctx.apiKeyTier);
+      });
+      if (tierEligible.length === 0) {
+        return {
+          account: null,
+          failureKind: "forbidden",
+          retryAfterMs: null,
+        };
+      }
+      return this.buildCooldownUnavailable(tierEligible, now);
+    }
+
     // All accounts in cooldown — find the most recoverable one
-    const firstAcct = this.accounts.get(this.accountOrder[0])!;
+    return this.buildCooldownUnavailable(this.accountOrder, now);
+  }
+
+  private buildCooldownUnavailable(emails: string[], now: number): AccountResult {
+    const firstAcct = this.accounts.get(emails[0])!;
     let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
     let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
-    for (const email of this.accountOrder.slice(1)) {
+    for (const email of emails.slice(1)) {
       const acct = this.accounts.get(email)!;
       const kind = acct.lastFailureKind ?? "network";
       const remainingMs = Math.max(0, acct.cooldownUntil - now);
@@ -406,10 +478,104 @@ export class AccountManager {
     };
   }
 
+  private getNextCodexAccount(ctx?: AccountSelectionContext): AccountResult {
+    const count = this.accountOrder.length;
+    if (count === 0) {
+      return { account: null, failureKind: null, retryAfterMs: null };
+    }
+
+    const now = Date.now();
+    this.reapExpiredSessionBindings(now);
+
+    if (ctx?.sessionKey) {
+      const binding = this.sessionBindings.get(ctx.sessionKey);
+      if (binding && binding.stickyUntil > now) {
+        const acct = this.accounts.get(binding.email);
+        if (
+          acct &&
+          this.isStickyReusable(acct, now) &&
+          this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier)
+        ) {
+          acct.routing.lastActiveAt = new Date(now).toISOString();
+          this.maybeRefreshRoutingMetadata(acct, now, "activity");
+          return {
+            account: buildAvailableAccount(
+              this.authDir,
+              binding.email,
+              acct.token,
+              this.provider,
+            ),
+          };
+        }
+      }
+    }
+
+    const candidates = this.accountOrder
+      .map((email, idx) => ({ email, idx, acct: this.accounts.get(email)! }))
+      .filter(
+        ({ acct }) =>
+          acct.cooldownUntil <= now &&
+          this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier),
+      );
+    if (candidates.length === 0) {
+      const tierEligible = this.accountOrder.filter((email) => {
+        const acct = this.accounts.get(email)!;
+        return this.isAccountAllowedForTier(acct.token.routing?.level, ctx?.apiKeyTier);
+      });
+      if (ctx?.apiKeyTier && tierEligible.length === 0) {
+        return {
+          account: null,
+          failureKind: "forbidden",
+          retryAfterMs: null,
+        };
+      }
+      return this.buildCooldownUnavailable(
+        tierEligible.length > 0 ? tierEligible : this.accountOrder,
+        now,
+      );
+    }
+
+    let best = candidates[0];
+    let bestScore = this.scoreCodexCandidate(best.acct, now);
+    for (const candidate of candidates.slice(1)) {
+      const score = this.scoreCodexCandidate(candidate.acct, now);
+      if (score > bestScore + 1e-9) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    this.lastUsedIndex = best.idx;
+    this.stickyUntil = now + randomStickyDuration();
+    best.acct.routing.lastActiveAt = new Date(now).toISOString();
+    this.maybeRefreshRoutingMetadata(best.acct, now, "activity");
+
+    if (ctx?.sessionKey) {
+      this.sessionBindings.set(ctx.sessionKey, {
+        email: best.email,
+        stickyUntil: now + this.computeSessionStickyDuration(best.acct, now),
+        lastSeenAt: new Date(now).toISOString(),
+        model: ctx.model ?? null,
+      });
+    }
+
+    return {
+      account: buildAvailableAccount(
+        this.authDir,
+        best.email,
+        best.acct.token,
+        this.provider,
+      ),
+    };
+  }
+
   recordAttempt(email: string): void {
     const acct = this.accounts.get(email);
     if (acct) {
       acct.totalRequests++;
+      const now = Date.now();
+      acct.routing.lastActiveAt = new Date(now).toISOString();
+      this.maybeRefreshRoutingMetadata(acct, now, "activity");
     }
   }
 
@@ -424,6 +590,7 @@ export class AccountManager {
     acct.lastFailureAt = null;
     acct.lastSuccessAt = new Date().toISOString();
     acct.totalSuccesses++;
+    this.maybeRefreshRoutingMetadata(acct, Date.now(), "success");
 
     if (usage) {
       acct.totalInputTokens += usage.inputTokens;
@@ -454,6 +621,7 @@ export class AccountManager {
       maxMs,
     );
     acct.cooldownUntil = Date.now() + cooldownMs;
+    this.maybeRefreshRoutingMetadata(acct, Date.now(), "failure");
     console.log(
       `[${this.provider}] account ${email} cooled down for ${Math.round(
         cooldownMs / 1000,
@@ -475,6 +643,23 @@ export class AccountManager {
       acct.refreshPromise = this.performRefresh(acct);
     }
     return acct.refreshPromise;
+  }
+
+  observeRetryAfter(email: string, retryAfterHeader: string | null): void {
+    if (this.routingMode !== "codex-smart" || !retryAfterHeader) return;
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+    const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+    if (retryAfterMs == null) return;
+    const now = Date.now();
+    acct.routing.resetAt = new Date(now + retryAfterMs).toISOString();
+    acct.routing.lastQuotaSyncAt = new Date(now).toISOString();
+    acct.routing.confidence = "observed";
+    acct.routing.windowType =
+      acct.routing.windowType ?? inferWindowType(acct.token.planType);
+    acct.routing.resetPeriodMs =
+      acct.routing.resetPeriodMs ?? inferResetPeriodMs(acct.token.planType);
+    acct.routing.nextRefreshAt = now + this.metadataRefreshIntervalMs(acct, now);
   }
 
   getSnapshots(): AccountSnapshot[] {
@@ -500,7 +685,12 @@ export class AccountManager {
         totalReasoningOutputTokens: acct.totalReasoningOutputTokens,
         expiresAt: acct.token.expiresAt,
         refreshing: acct.refreshPromise !== null,
+        routingExtra: acct.token.routing,
         planType: acct.token.planType,
+        routing:
+          this.routingMode === "codex-smart"
+            ? { ...acct.routing }
+            : undefined,
       });
     }
     return snapshots;
@@ -682,6 +872,173 @@ export class AccountManager {
       totalCacheReadInputTokens: 0,
       totalReasoningOutputTokens: 0,
       refreshPromise: null,
+      routing: {
+        resetAt: null,
+        lastQuotaSyncAt: null,
+        lastActiveAt: null,
+        nextRefreshAt: 0,
+        confidence: "unknown",
+        windowType: inferWindowType(token.planType),
+        resetPeriodMs: inferResetPeriodMs(token.planType),
+      },
     };
   }
+
+  private reapExpiredSessionBindings(now: number): void {
+    for (const [key, binding] of this.sessionBindings) {
+      if (binding.stickyUntil <= now) this.sessionBindings.delete(key);
+    }
+  }
+
+  private isStickyReusable(acct: AccountState, now: number): boolean {
+    if (acct.cooldownUntil > now) return false;
+    if (acct.lastFailureKind === "auth" || acct.lastFailureKind === "forbidden")
+      return false;
+    return true;
+  }
+
+  private isAccountAllowedForTier(
+    accountLevel: RoutingLevel | undefined,
+    apiKeyTier: ApiKeyTier | undefined,
+  ): boolean {
+    if (!apiKeyTier) return true;
+    const level = (accountLevel || "lite").toLowerCase() as RoutingLevel;
+    switch (apiKeyTier) {
+      case "admin":
+        return true;
+      case "pro":
+        return level === "lite" || level === "pro";
+      case "lite":
+        return level === "lite";
+      default:
+        return false;
+    }
+  }
+
+  private scoreCodexCandidate(acct: AccountState, now: number): number {
+    const resetUrgency = this.computeResetUrgency(acct, now);
+    const planBias = planTypeBias(acct.token.planType);
+    const routingBias = acct.token.routing?.bias ?? 0;
+    const healthPenalty = Math.min(acct.failureCount * 0.15, 0.6);
+    return resetUrgency * 0.75 + planBias + routingBias - healthPenalty;
+  }
+
+  private computeResetUrgency(acct: AccountState, now: number): number {
+    const { resetAt, resetPeriodMs } = acct.routing;
+    if (!resetAt || !resetPeriodMs || resetPeriodMs <= 0) return 0;
+    const remainingMs = new Date(resetAt).getTime() - now;
+    const clamped = Math.max(0, Math.min(remainingMs, resetPeriodMs));
+    return 1 - clamped / resetPeriodMs;
+  }
+
+  private computeSessionStickyDuration(acct: AccountState, now: number): number {
+    const resetAtMs = acct.routing.resetAt
+      ? new Date(acct.routing.resetAt).getTime()
+      : null;
+    if (resetAtMs) {
+      const remainingMs = resetAtMs - now;
+      if (remainingMs > 0 && remainingMs <= 60 * 60 * 1000) {
+        return Math.max(
+          3 * 60 * 1000,
+          Math.min(15 * 60 * 1000, Math.floor(remainingMs / 4)),
+        );
+      }
+    }
+    return randomStickyDuration();
+  }
+
+  private maybeRefreshRoutingMetadata(
+    acct: AccountState,
+    now: number,
+    trigger: "activity" | "success" | "failure",
+  ): void {
+    if (this.routingMode !== "codex-smart") return;
+    if (trigger === "failure" && acct.lastFailureKind === "rate_limit") return;
+    if (now < acct.routing.nextRefreshAt) return;
+
+    acct.routing.windowType =
+      acct.routing.windowType ?? inferWindowType(acct.token.planType);
+    acct.routing.resetPeriodMs =
+      acct.routing.resetPeriodMs ?? inferResetPeriodMs(acct.token.planType);
+    if (!acct.routing.resetPeriodMs) {
+      acct.routing.lastQuotaSyncAt = new Date(now).toISOString();
+      acct.routing.nextRefreshAt = now + 10 * 60 * 1000;
+      return;
+    }
+
+    if (!acct.routing.resetAt) {
+      acct.routing.resetAt = new Date(
+        now + acct.routing.resetPeriodMs,
+      ).toISOString();
+      acct.routing.confidence = "estimated";
+    } else {
+      let resetAtMs = new Date(acct.routing.resetAt).getTime();
+      while (resetAtMs <= now) resetAtMs += acct.routing.resetPeriodMs;
+      acct.routing.resetAt = new Date(resetAtMs).toISOString();
+    }
+    acct.routing.lastQuotaSyncAt = new Date(now).toISOString();
+    acct.routing.nextRefreshAt = now + this.metadataRefreshIntervalMs(acct, now);
+  }
+
+  private metadataRefreshIntervalMs(acct: AccountState, now: number): number {
+    const resetAtMs = acct.routing.resetAt
+      ? new Date(acct.routing.resetAt).getTime()
+      : null;
+    if (resetAtMs && resetAtMs - now <= 60 * 60 * 1000) {
+      return 5 * 60 * 1000;
+    }
+    return 10 * 60 * 1000;
+  }
+}
+
+function inferResetPeriodMs(planType: string | undefined): number | null {
+  switch ((planType || "").toLowerCase()) {
+    case "plus":
+    case "pro":
+      return 5 * 60 * 60 * 1000;
+    case "team":
+      return 30 * 24 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
+function inferWindowType(planType: string | undefined): string | null {
+  switch ((planType || "").toLowerCase()) {
+    case "plus":
+      return "plus_5h";
+    case "pro":
+      return "pro_5h";
+    case "team":
+      return "team_monthly";
+    default:
+      return null;
+  }
+}
+
+function planTypeBias(planType: string | undefined): number {
+    switch ((planType || "").toLowerCase()) {
+      case "plus":
+        return 0.08;
+      case "pro":
+        return 0.05;
+      case "team":
+        return 0.03;
+      case "free":
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+function parseRetryAfterMs(header: string): number | null {
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.floor(seconds * 1000);
+  }
+  const when = new Date(header).getTime();
+  if (Number.isFinite(when)) {
+    return Math.max(0, when - Date.now());
+  }
+  return null;
 }

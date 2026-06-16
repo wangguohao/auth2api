@@ -20,8 +20,15 @@ import {
   makeResponsesState,
   anthropicSSEToResponses,
 } from "../src/upstream/translator";
-import { loadConfig, isDebugLevel, resolveAuthDir } from "../src/config";
-import { UsageData } from "../src/accounts/manager";
+import {
+  loadConfig,
+  isDebugLevel,
+  resolveApiKeyRateLimit,
+  resolveAuthDir,
+} from "../src/config";
+import { AccountManager, UsageData } from "../src/accounts/manager";
+import { buildSessionBindingKey } from "../src/routing/session";
+import { parseRoutingExtraArg } from "../src/auth/routing-extra";
 
 // ══════════════════════════════════════════════════
 // utils/common.ts
@@ -36,6 +43,34 @@ test("extractApiKey extracts Bearer token", () => {
 
 test("extractApiKey extracts x-api-key header", () => {
   assert.equal(extractApiKey({ "x-api-key": "sk-test-456" }), "sk-test-456");
+});
+
+test("buildSessionBindingKey scopes session ids by client key hash", () => {
+  assert.equal(
+    buildSessionBindingKey("client-hash", "session-1"),
+    "client-hash:session-1",
+  );
+  assert.equal(buildSessionBindingKey(undefined, "session-1"), "session-1");
+  assert.equal(buildSessionBindingKey("client-hash", undefined), undefined);
+});
+
+test("parseRoutingExtraArg parses routing bias and level", () => {
+  assert.equal(parseRoutingExtraArg(undefined), undefined);
+  assert.deepEqual(parseRoutingExtraArg('{"bias":1}'), { bias: 1 });
+  assert.deepEqual(parseRoutingExtraArg('{"level":"pro"}'), { level: "pro" });
+  assert.deepEqual(parseRoutingExtraArg('{"bias":1,"level":"lite"}'), {
+    bias: 1,
+    level: "lite",
+  });
+});
+
+test("parseRoutingExtraArg rejects invalid JSON and legacy fields", () => {
+  assert.throws(() => parseRoutingExtraArg("{"), /Invalid --routingExtra JSON/);
+  assert.throws(() => parseRoutingExtraArg('{"weight":1}'), /Unsupported --routingExtra field: weight/);
+  assert.throws(
+    () => parseRoutingExtraArg('{"routingBias":1}'),
+    /Unsupported --routingExtra field: routingBias/,
+  );
 });
 
 test("extractApiKey prefers Bearer over x-api-key", () => {
@@ -386,9 +421,11 @@ test("loadConfig uses defaults when file missing", () => {
   const config = loadConfig("/tmp/nonexistent-config-" + Date.now() + ".yaml");
   assert.equal(config.port, 8317);
   assert.equal(config["body-limit"], "200mb");
+  assert.equal(config["api-key-rate-limit"]["window-ms"], 18000000);
+  assert.equal(config["api-key-rate-limit"]["max-requests"], 300);
   assert.equal(config.debug, "off");
-  assert.ok(config["api-keys"] instanceof Set);
-  assert.ok(config["api-keys"].size > 0); // auto-generated
+  assert.ok(config["bootstrap-admin-key"]);
+  assert.ok(config["bootstrap-admin-key"]!.startsWith("sk-"));
 });
 
 test("loadConfig normalizes debug mode", () => {
@@ -396,12 +433,152 @@ test("loadConfig normalizes debug mode", () => {
     os.tmpdir(),
     `auth2api-debug-test-${Date.now()}.yaml`,
   );
-  fs.writeFileSync(configPath, 'api-keys:\n  - "sk-test"\ndebug: true\n');
+  fs.writeFileSync(configPath, 'bootstrap-admin-key: "sk-test"\ndebug: true\n');
   try {
     const config = loadConfig(configPath);
     assert.equal(config.debug, "errors"); // true → "errors"
   } finally {
     fs.unlinkSync(configPath);
+  }
+});
+
+test("loadConfig merges api-key rate limit overrides", () => {
+  const configPath = path.join(
+    os.tmpdir(),
+    `auth2api-rate-limit-test-${Date.now()}.yaml`,
+  );
+  fs.writeFileSync(
+    configPath,
+    [
+      "api-key-rate-limit:",
+      "  max-requests: 42",
+      "  overrides:",
+      '    "sk-test":',
+      "      window-ms: 60000",
+      'debug: "off"',
+      "",
+    ].join("\n"),
+  );
+  try {
+    const config = loadConfig(configPath);
+    assert.equal(config["api-key-rate-limit"]["max-requests"], 42);
+    assert.equal(config["api-key-rate-limit"]["window-ms"], 18000000);
+    assert.equal(
+      config["api-key-rate-limit"].overrides?.["sk-test"]?.["window-ms"],
+      60000,
+    );
+  } finally {
+    fs.unlinkSync(configPath);
+  }
+});
+
+test("resolveApiKeyRateLimit applies per-key overrides", () => {
+  const config = {
+    "window-ms": 18000000,
+    "max-requests": 300,
+    overrides: {
+      "sk-a": {
+        "max-requests": 50,
+      },
+      "sk-b": {
+        "window-ms": 60000,
+        "max-requests": 5,
+      },
+    },
+  };
+  assert.deepEqual(resolveApiKeyRateLimit(config, "sk-a"), {
+    "window-ms": 18000000,
+    "max-requests": 50,
+  });
+  assert.deepEqual(resolveApiKeyRateLimit(config, "sk-b"), {
+    "window-ms": 60000,
+    "max-requests": 5,
+  });
+  assert.deepEqual(resolveApiKeyRateLimit(config, "sk-c"), {
+    "window-ms": 18000000,
+    "max-requests": 300,
+  });
+});
+
+test("ApiKeyRegistry keeps bootstrap admin record even when another admin already exists", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    fs.writeFileSync(
+      path.join(tmpDir, "api-keys.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          keys: [
+            {
+              id: "ak_existing",
+              secret: "sk-existing-admin",
+              tier: "admin",
+              name: "existing",
+              enabled: true,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    const keys = registry.list();
+    assert.ok(keys.some((k) => k.secret === "sk-bootstrap-admin"));
+    assert.equal(
+      keys.filter((k) => k.tier === "admin" && k.enabled).length,
+      1,
+    );
+    assert.equal(registry.getAdminSecret(), "sk-existing-admin");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("default account selection respects api key tier filters", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-tier-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "anthropic",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+    });
+    manager.addAccount({
+      accessToken: "pro",
+      refreshToken: "rt-pro",
+      email: "pro@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "up",
+      provider: "anthropic",
+      routing: { level: "pro" },
+    });
+    manager.addAccount({
+      accessToken: "lite",
+      refreshToken: "rt-lite",
+      email: "lite@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "ul",
+      provider: "anthropic",
+      routing: { level: "lite" },
+    });
+
+    const chosen = manager.getNextAccount({ apiKeyTier: "lite" });
+    assert.equal(chosen.account?.token.email, "lite@example.com");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
@@ -994,6 +1171,21 @@ test("anthropicSSEToResponses returns empty for unknown events", () => {
 import { StatsRecorder, StatsEvent } from "../src/stats/recorder";
 import { replayStatsEvents, statsFilePath } from "../src/stats/storage";
 import { createServer } from "../src/server";
+import { ApiKeyRegistry } from "../src/auth/api-key-registry";
+
+function makeApiKeyRegistry(authDir: string): ApiKeyRegistry {
+  const registry = new ApiKeyRegistry(authDir, {
+    bootstrapAdminKey: "sk-test",
+    seededKeys: ["sk-test"],
+    tierLimits: {
+      lite: { concurrency: 5, maxRequests5h: 300 },
+      pro: { concurrency: 10, maxRequests5h: 600 },
+      admin: { concurrency: 10, maxRequests5h: 600 },
+    },
+  });
+  registry.load();
+  return registry;
+}
 
 function makeStatsEvent(over: Partial<StatsEvent> = {}): StatsEvent {
   return {
@@ -1090,12 +1282,16 @@ test("createServer stats endpoint records mounted route prefix", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const apiKeys = makeApiKeyRegistry(tmp);
   const app = createServer(
     {
       host: "",
       port: 0,
       "auth-dir": tmp,
-      "api-keys": new Set(["sk-test"]),
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {
@@ -1107,6 +1303,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       debug: "off",
     } as any,
     {} as any,
+    apiKeys,
     recorder,
   );
   const server = app.listen(0);
@@ -1130,12 +1327,16 @@ test("createServer stats records client disconnects on close", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const apiKeys = makeApiKeyRegistry(tmp);
   const app = createServer(
     {
       host: "",
       port: 0,
       "auth-dir": tmp,
-      "api-keys": new Set(["sk-test"]),
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {
@@ -1147,6 +1348,7 @@ test("createServer stats records client disconnects on close", async () => {
       debug: "off",
     } as any,
     {} as any,
+    apiKeys,
     recorder,
   );
   let resolveReached!: () => void;
@@ -1183,6 +1385,79 @@ test("createServer stats records client disconnects on close", async () => {
     assert.equal(event.status, "failure");
     assert.equal(event.statusCode, 499);
     assert.equal(event.failureKind, "client_disconnect");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await recorder.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer stats records api-key rate-limited requests", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const recorder = new StatsRecorder();
+  recorder.start(tmp);
+  const apiKeys = new ApiKeyRegistry(tmp, {
+    bootstrapAdminKey: "sk-admin",
+    seededKeys: ["sk-lite"],
+    tierLimits: {
+      lite: { concurrency: 5, maxRequests5h: 1 },
+      pro: { concurrency: 10, maxRequests5h: 2 },
+      admin: { concurrency: 10, maxRequests5h: 2 },
+    },
+  });
+  apiKeys.load();
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 1,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {
+      withAccounts: () => [],
+      all: () => [],
+    } as any,
+    apiKeys,
+    recorder,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const headers = { Authorization: "Bearer sk-lite" };
+    const first = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers });
+    const second = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers,
+    });
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 429);
+
+    const snap = recorder.getSnapshot();
+    const apiBucket = snap.byApi["GET /v1/models|unknown|unknown"];
+    assert.equal(apiBucket.requests, 2);
+    assert.equal(apiBucket.failures, 1);
+    assert.equal(snap.totals.failures, 1);
+
+    await recorder.stop();
+    const events = fs
+      .readFileSync(statsFilePath(tmp), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(events.length, 2);
+    assert.equal(events[1].statusCode, 429);
+    assert.equal(events[1].failureKind, "rate_limit");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await recorder.stop();

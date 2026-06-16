@@ -14,6 +14,7 @@ import {
   makeResponsesToAnthropicState,
   drainCodexResponsesSse,
 } from "../upstream/responses-translator";
+import { buildSessionBindingKey, extractSessionKey } from "../routing/session";
 
 function internalError(resp: ExpressResponse): void {
   if (!resp.headersSent) {
@@ -40,6 +41,15 @@ async function proxyCodexMessages(args: {
 }): Promise<void> {
   const { req, resp, config, provider, body, model } = args;
   const stream = !!body.stream;
+  const selectionContext = {
+    sessionKey: buildSessionBindingKey(
+      resp.locals.authApiKeyHash,
+      extractSessionKey(req, body),
+    ),
+    model,
+    path: req.path,
+    apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+  };
   const responsesBody = normalizeCodexResponsesBody(
     anthropicToResponsesRequest(body),
   );
@@ -61,6 +71,7 @@ async function proxyCodexMessages(args: {
 
   await proxyWithRetry("Messages(codex)", resp, config, {
     manager: provider.manager,
+    selectionContext,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -182,6 +193,15 @@ export function createMessagesHandler(
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
+      const selectionContext = {
+        sessionKey: buildSessionBindingKey(
+          resp.locals.authApiKeyHash,
+          extractSessionKey(req, body),
+        ),
+        model,
+        path: req.path,
+        apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+      };
       tagStatsModel(resp, model, provider.id);
 
       // Codex's upstream is the OpenAI Responses API; route /v1/messages
@@ -220,6 +240,7 @@ export function createMessagesHandler(
 
       await proxyWithRetry("Messages", resp, config, {
         manager: provider.manager,
+        selectionContext,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({
@@ -273,6 +294,15 @@ export function createCountTokensHandler(
       const body = req.body;
       const model = resolveModel(body?.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
+      const selectionContext = {
+        sessionKey: buildSessionBindingKey(
+          resp.locals.authApiKeyHash,
+          extractSessionKey(req, body),
+        ),
+        model,
+        path: req.path,
+        apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+      };
       tagStatsModel(resp, model, provider.id);
 
       if (!provider.callCountTokens) {
@@ -289,6 +319,7 @@ export function createCountTokensHandler(
       const callCountTokens = provider.callCountTokens.bind(provider);
       await proxyWithRetry("CountTokens", resp, config, {
         manager: provider.manager,
+        selectionContext,
         upstream: (account, signal) =>
           callCountTokens({ request: req, account, config, signal }),
         success: async (upstream, account) => {

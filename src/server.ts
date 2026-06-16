@@ -1,7 +1,13 @@
 import express from "express";
-import { Config, isDebugLevel } from "./config";
+import {
+  Config,
+  isDebugLevel,
+  resolveTierLimit,
+} from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
+import { ApiKeyRegistry } from "./auth/api-key-registry";
+import { ApiKeyTier } from "./auth/types";
 import {
   createChatCompletionsHandler,
   createResponsesHandler,
@@ -12,40 +18,45 @@ import {
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
 
-// Simple in-memory rate limiter per IP
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX = 60;
-
-function rateLimit(ip: string): boolean {
+function bumpFixedWindowCounter(
+  counters: Map<string, { count: number; resetAt: number }>,
+  key: string,
+  windowMs: number,
+  maxCount: number,
+): { allowed: boolean; resetAt: number } {
   const now = Date.now();
-  const entry = rateLimitMap.get(ip);
+  const entry = counters.get(key);
   if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return true;
+    const resetAt = now + windowMs;
+    counters.set(key, { count: 1, resetAt });
+    return { allowed: true, resetAt };
   }
   entry.count++;
-  return entry.count <= RATE_LIMIT_MAX;
+  return { allowed: entry.count <= maxCount, resetAt: entry.resetAt };
 }
-
-// Cleanup stale entries every 5 minutes
-const cleanupTimer = setInterval(
-  () => {
-    const now = Date.now();
-    for (const [ip, entry] of rateLimitMap) {
-      if (now > entry.resetAt) rateLimitMap.delete(ip);
-    }
-  },
-  5 * 60 * 1000,
-);
-cleanupTimer.unref();
 
 export function createServer(
   config: Config,
   registry: ProviderRegistry,
+  apiKeyRegistry: ApiKeyRegistry,
   statsRecorder?: StatsRecorder,
 ): express.Application {
   const app = express();
+  const ipRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  const apiKeyRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  const apiKeyConcurrencyMap = new Map<string, number>();
+
+  // Cleanup stale entries every 5 minutes.
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of ipRateLimitMap) {
+      if (now > entry.resetAt) ipRateLimitMap.delete(ip);
+    }
+    for (const [apiKeyHash, entry] of apiKeyRateLimitMap) {
+      if (now > entry.resetAt) apiKeyRateLimitMap.delete(apiKeyHash);
+    }
+  }, 5 * 60 * 1000);
+  cleanupTimer.unref();
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -84,7 +95,8 @@ export function createServer(
   // Rate limiting middleware
   app.use("/v1", (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
-    if (!rateLimit(ip)) {
+    const result = bumpFixedWindowCounter(ipRateLimitMap, ip, 60 * 1000, 60);
+    if (!result.allowed) {
       res.status(429).json({ error: { message: "Too many requests" } });
       return;
     }
@@ -99,19 +111,23 @@ export function createServer(
       res.status(401).json({ error: { message: "Missing API key" } });
       return;
     }
-    const valid = config["api-keys"].has(key);
-    if (!valid) {
+    const auth = apiKeyRegistry.authenticate(key);
+    if (!auth) {
       res.status(403).json({ error: { message: "Invalid API key" } });
       return;
     }
     // Seed res.locals.stats so the stats-finish middleware can record this
     // request even if the downstream handler aborts before filling in the
     // upstream account / model / usage fields.
+    res.locals.authApiKey = key;
+    res.locals.authApiKeyHash = hashApiKey(key);
+    res.locals.authApiKeyTier = auth.record.tier;
+    res.locals.authApiKeyRecord = auth.record;
     if (statsRecorder) {
       const ip = req.ip || req.socket.remoteAddress || "unknown";
       const ua = (req.headers["user-agent"] as string) || "";
       res.locals.stats = {
-        apiKeyHash: hashApiKey(key),
+        apiKeyHash: res.locals.authApiKeyHash,
         ip,
         ua,
         endpoint: `${req.method} ${req.baseUrl}${req.path}`,
@@ -123,6 +139,69 @@ export function createServer(
         failureKind: null,
       };
     }
+    next();
+  };
+
+  const apiKeyRateLimitMiddleware: express.RequestHandler = (_req, res, next) => {
+    const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
+    const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
+    if (!apiKeyHash || !apiKeyTier) return next();
+
+    const limits = apiKeyRegistry.resolveLimits(apiKeyTier);
+    const result = bumpFixedWindowCounter(
+      apiKeyRateLimitMap,
+      apiKeyHash,
+      5 * 60 * 60 * 1000,
+      limits.maxRequests5h,
+    );
+    if (result.allowed) return next();
+
+    if (res.locals.stats) {
+      res.locals.stats.failureKind = "rate_limit";
+    }
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((result.resetAt - Date.now()) / 1000),
+    );
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    res.status(429).json({
+      error: {
+        message: "API key request limit exceeded for the configured tier window",
+      },
+    });
+  };
+
+  const apiKeyConcurrencyMiddleware: express.RequestHandler = (_req, res, next) => {
+    const apiKeyHash = res.locals.authApiKeyHash as string | undefined;
+    const apiKeyTier = res.locals.authApiKeyTier as ApiKeyTier | undefined;
+    if (!apiKeyHash || !apiKeyTier) return next();
+
+    const limits = apiKeyRegistry.resolveLimits(apiKeyTier);
+    const current = apiKeyConcurrencyMap.get(apiKeyHash) || 0;
+    if (current >= limits.concurrency) {
+      if (res.locals.stats) {
+        res.locals.stats.failureKind = "rate_limit";
+      }
+      res.setHeader("Retry-After", "1");
+      res.status(429).json({
+        error: {
+          message: "API key concurrent request limit exceeded for the configured tier",
+        },
+      });
+      return;
+    }
+
+    apiKeyConcurrencyMap.set(apiKeyHash, current + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const next = (apiKeyConcurrencyMap.get(apiKeyHash) || 1) - 1;
+      if (next <= 0) apiKeyConcurrencyMap.delete(apiKeyHash);
+      else apiKeyConcurrencyMap.set(apiKeyHash, next);
+    };
+    res.on("finish", release);
+    res.on("close", release);
     next();
   };
 
@@ -191,7 +270,20 @@ export function createServer(
     res.json({ status: "ok" });
   });
 
-  app.use("/admin", requireApiKey);
+  const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
+    requireApiKey(req, res, () => {
+      const record = res.locals.authApiKeyRecord as
+        | { tier?: ApiKeyTier; enabled?: boolean }
+        | undefined;
+      if (!record || record.tier !== "admin" || record.enabled === false) {
+        res.status(403).json({ error: { message: "Admin API key required" } });
+        return;
+      }
+      next();
+    });
+  };
+
+  app.use("/admin", requireAdminApiKey);
   app.use("/admin", statsFinishMiddleware);
 
   // GET /admin/stats — three-axis aggregated call statistics.
@@ -226,6 +318,35 @@ export function createServer(
     });
   });
 
+  app.get("/admin/api-keys", (_req, res) => {
+    res.json({
+      keys: apiKeyRegistry.list().map(({ secret, ...rest }) => rest),
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  app.post("/admin/api-keys", (req, res) => {
+    const tier = req.body?.tier as ApiKeyTier | undefined;
+    const name = typeof req.body?.name === "string" ? req.body.name : undefined;
+    const enabled = req.body?.enabled === undefined ? true : !!req.body.enabled;
+    if (tier && tier !== "lite" && tier !== "pro" && tier !== "admin") {
+      res.status(400).json({ error: { message: "Invalid tier" } });
+      return;
+    }
+    if (tier === "admin" && enabled === false) {
+      res.status(400).json({ error: { message: "Admin key cannot be disabled" } });
+      return;
+    }
+    const created = apiKeyRegistry.createKey({ tier, name, enabled });
+    res.status(201).json({
+      key: {
+        ...created.record,
+        secret: created.secret,
+      },
+      generated_at: new Date().toISOString(),
+    });
+  });
+
   // POST /admin/reload — re-reads token files from auth-dir and reconciles
   // each provider's in-memory state. Called automatically by `--login` after
   // a successful re-auth (see notifyServerReload in src/index.ts), and
@@ -233,6 +354,12 @@ export function createServer(
   // upsert semantics.
   app.post("/admin/reload", async (_req, res) => {
     const reloaded: Record<string, unknown> = {};
+    try {
+      apiKeyRegistry.reload();
+      reloaded["api-keys"] = { ok: true };
+    } catch (err: any) {
+      reloaded["api-keys"] = { error: err?.message || String(err) };
+    }
     for (const p of registry.all()) {
       try {
         reloaded[p.id] = await p.manager.reload();
@@ -248,6 +375,8 @@ export function createServer(
 
   app.use("/v1", requireApiKey);
   app.use("/v1", statsFinishMiddleware);
+  app.use("/v1", apiKeyRateLimitMiddleware);
+  app.use("/v1", apiKeyConcurrencyMiddleware);
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();

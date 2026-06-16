@@ -49,13 +49,38 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+export interface ApiKeyTierLimitSpec {
+  concurrency?: number;
+  "max-requests-5h"?: number;
+}
+
+export interface ApiKeyTierLimitsConfig {
+  lite: ApiKeyTierLimitSpec;
+  pro: { concurrencyMultiplier?: number; "max-requests-multiplier"?: number };
+  admin: { concurrencyMultiplier?: number; "max-requests-multiplier"?: number };
+}
+
+export interface ApiKeyRateLimitConfig {
+  /** Rolling/fixed window size in milliseconds for each client API key. */
+  "window-ms": number;
+  /** Maximum accepted requests per API key within one window. */
+  "max-requests": number;
+  /** Optional per-key overrides; keys are matched against configured API keys verbatim. */
+  overrides?: Record<
+    string,
+    Partial<Pick<ApiKeyRateLimitConfig, "window-ms" | "max-requests">>
+  >;
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
   host: string;
   port: number;
   "auth-dir": string;
-  "api-keys": Set<string>;
+  "bootstrap-admin-key"?: string;
+  "api-key-tier-limits"?: ApiKeyTierLimitsConfig;
+  "api-key-rate-limit": ApiKeyRateLimitConfig;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -63,16 +88,34 @@ export interface Config {
   debug: DebugMode;
 }
 
-// Raw config shape from YAML (api-keys is an array, not a Set)
-interface RawConfig extends Omit<Config, "api-keys"> {
-  "api-keys": string[];
-}
+// Raw config shape from YAML.
+type RawConfig = Config & {
+  "api-keys"?: string[];
+};
 
 const DEFAULT_RAW: RawConfig = {
   host: "",
   port: 8317,
   "auth-dir": "~/.auth2api",
-  "api-keys": [],
+  "bootstrap-admin-key": "",
+  "api-key-tier-limits": {
+    lite: {
+      concurrency: 5,
+      "max-requests-5h": 300,
+    },
+    pro: {
+      concurrencyMultiplier: 2,
+      "max-requests-multiplier": 2,
+    },
+    admin: {
+      concurrencyMultiplier: 2,
+      "max-requests-multiplier": 2,
+    },
+  },
+  "api-key-rate-limit": {
+    "window-ms": 5 * 60 * 60 * 1000,
+    "max-requests": 300,
+  },
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.88",
@@ -126,9 +169,40 @@ export function loadConfig(configPath?: string): Config {
   } else {
     const content = fs.readFileSync(filePath, "utf-8");
     const parsed = yaml.load(content) as Partial<RawConfig>;
+    const { ["api-keys"]: _legacyApiKeys, ...parsedWithoutLegacyKeys } =
+      parsed as Partial<RawConfig> & { "api-keys"?: unknown };
+    const parsedTierLimits = (parsed["api-key-tier-limits"] || {}) as Partial<ApiKeyTierLimitsConfig>;
+    const defaultTierLimits = DEFAULT_RAW["api-key-tier-limits"]!;
     raw = {
       ...DEFAULT_RAW,
-      ...parsed,
+      ...parsedWithoutLegacyKeys,
+      "api-key-rate-limit": {
+        ...DEFAULT_RAW["api-key-rate-limit"],
+        ...(parsed["api-key-rate-limit"] || {}),
+        overrides: {
+          ...(DEFAULT_RAW["api-key-rate-limit"].overrides || {}),
+          ...((parsed["api-key-rate-limit"]?.overrides as Record<
+            string,
+            Partial<Pick<ApiKeyRateLimitConfig, "window-ms" | "max-requests">>
+          > | undefined) || {}),
+        },
+      },
+      "api-key-tier-limits": {
+        ...defaultTierLimits,
+        ...parsedTierLimits,
+        lite: {
+          ...defaultTierLimits.lite,
+          ...(parsedTierLimits.lite || {}),
+        },
+        pro: {
+          ...defaultTierLimits.pro,
+          ...(parsedTierLimits.pro || {}),
+        },
+        admin: {
+          ...defaultTierLimits.admin,
+          ...(parsedTierLimits.admin || {}),
+        },
+      },
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
@@ -137,15 +211,47 @@ export function loadConfig(configPath?: string): Config {
 
   raw.debug = normalizeDebugMode(raw.debug);
 
-  // Auto-generate API key if none configured
-  if (!raw["api-keys"] || raw["api-keys"].length === 0) {
-    const key = generateApiKey();
-    raw["api-keys"] = [key];
+  // Auto-generate bootstrap admin key if missing.
+  if (!raw["bootstrap-admin-key"]) {
+    raw["bootstrap-admin-key"] = generateApiKey();
     fs.writeFileSync(filePath, yaml.dump(raw, { lineWidth: -1 }), {
       mode: 0o600,
     });
-    console.log(`\nGenerated API key (saved to ${filePath}):\n\n  ${key}\n`);
+    console.log(
+      `\nGenerated bootstrap admin key (saved to ${filePath}):\n\n  ${raw["bootstrap-admin-key"]}\n`,
+    );
   }
 
-  return { ...raw, "api-keys": new Set(raw["api-keys"]) };
+  return { ...raw };
+}
+
+export function resolveApiKeyRateLimit(
+  config: ApiKeyRateLimitConfig,
+  apiKey: string,
+): Pick<ApiKeyRateLimitConfig, "window-ms" | "max-requests"> {
+  const override = config.overrides?.[apiKey];
+  return {
+    "window-ms": override?.["window-ms"] ?? config["window-ms"],
+    "max-requests": override?.["max-requests"] ?? config["max-requests"],
+  };
+}
+
+export function resolveTierLimit(
+  limits: ApiKeyTierLimitsConfig,
+  tier: "lite" | "pro" | "admin",
+): { concurrency: number; maxRequests5h: number } {
+  const lite = limits.lite;
+  const liteConcurrency = lite.concurrency ?? 5;
+  const liteRequests = lite["max-requests-5h"] ?? 300;
+  if (tier === "lite") {
+    return { concurrency: liteConcurrency, maxRequests5h: liteRequests };
+  }
+
+  const spec = limits[tier];
+  const concurrencyMultiplier = spec.concurrencyMultiplier ?? 2;
+  const requestsMultiplier = spec["max-requests-multiplier"] ?? 2;
+  return {
+    concurrency: Math.max(1, Math.round(liteConcurrency * concurrencyMultiplier)),
+    maxRequests5h: Math.max(1, Math.round(liteRequests * requestsMultiplier)),
+  };
 }

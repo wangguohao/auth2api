@@ -22,6 +22,7 @@ import {
 } from "../src/auth/refresh-errors";
 import { waitForCallback } from "../src/auth/callback-server";
 import http from "node:http";
+import { buildSessionBindingKey } from "../src/routing/session";
 
 // ══════════════════════════════════════════════════
 // utils/jwt.ts
@@ -146,6 +147,7 @@ test("token-storage round-trips codex tokens with codex-* filename", () => {
       accountUuid: "chatgpt-acct-1",
       provider: "codex",
       idToken: "id.jwt.token",
+      routing: { bias: 1.5 },
     };
     saveToken(tmpDir, data);
     const files = fs.readdirSync(tmpDir);
@@ -156,6 +158,7 @@ test("token-storage round-trips codex tokens with codex-* filename", () => {
     assert.equal(tokens[0].provider, "codex");
     assert.equal(tokens[0].idToken, "id.jwt.token");
     assert.equal(tokens[0].accountUuid, "chatgpt-acct-1");
+    assert.equal(tokens[0].routing?.bias, 1.5);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -335,6 +338,258 @@ test("getNextAccount returns null when no accounts loaded", () => {
       assert.equal(result.failureKind, null);
       assert.equal(result.retryAfterMs, null);
     }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing keeps session sticky until account cools down", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "a",
+      refreshToken: "ra",
+      email: "a@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "ua",
+      provider: "codex",
+      planType: "plus",
+    });
+    manager.addAccount({
+      accessToken: "b",
+      refreshToken: "rb",
+      email: "b@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "ub",
+      provider: "codex",
+      planType: "plus",
+    });
+
+    const first = manager.getNextAccount({
+      sessionKey: "session-1",
+      model: "gpt-5",
+    });
+    assert.equal(first.account?.token.email, "a@example.com");
+
+    const second = manager.getNextAccount({
+      sessionKey: "session-1",
+      model: "gpt-5.5",
+    });
+    assert.equal(second.account?.token.email, "a@example.com");
+
+    manager.recordFailure("a@example.com", "rate_limit", "limit");
+    const third = manager.getNextAccount({
+      sessionKey: "session-1",
+      model: "gpt-5",
+    });
+    assert.equal(third.account?.token.email, "b@example.com");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing prefers free accounts with higher plan bias", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "free",
+      refreshToken: "rf",
+      email: "free@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "uf",
+      provider: "codex",
+      planType: "free",
+    });
+    manager.addAccount({
+      accessToken: "plus",
+      refreshToken: "rp",
+      email: "plus@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "up",
+      provider: "codex",
+      planType: "plus",
+    });
+
+    const chosen = manager.getNextAccount({
+      sessionKey: "session-free",
+      model: "gpt-5",
+    });
+    assert.equal(chosen.account?.token.email, "free@example.com");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing prefers explicit routing bias over plan bias", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "free",
+      refreshToken: "rf",
+      email: "free@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "uf",
+      provider: "codex",
+      planType: "free",
+    });
+    manager.addAccount({
+      accessToken: "plus",
+      refreshToken: "rp",
+      email: "plus@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "up",
+      provider: "codex",
+      planType: "plus",
+      routing: { bias: 1.25 },
+    });
+
+    const chosen = manager.getNextAccount({
+      sessionKey: "session-bias",
+      model: "gpt-5",
+    });
+    assert.equal(chosen.account?.token.email, "plus@example.com");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing does not fall back across tier restrictions", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "pro",
+      refreshToken: "rp",
+      email: "pro@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "up",
+      provider: "codex",
+      planType: "pro",
+      routing: { level: "pro" },
+    });
+
+    const chosen = manager.getNextAccount({
+      sessionKey: "session-lite",
+      model: "gpt-5",
+      apiKeyTier: "lite",
+    });
+    assert.equal(chosen.account, null);
+    assert.equal(chosen.failureKind, "forbidden");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing isolates identical session ids by client key", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "a",
+      refreshToken: "ra",
+      email: "a@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "ua",
+      provider: "codex",
+      planType: "plus",
+    });
+    manager.addAccount({
+      accessToken: "b",
+      refreshToken: "rb",
+      email: "b@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "ub",
+      provider: "codex",
+      planType: "plus",
+    });
+
+    const clientASession = buildSessionBindingKey("client-a", "session-1");
+    const clientBSession = buildSessionBindingKey("client-b", "session-1");
+    assert.equal(clientASession, "client-a:session-1");
+    assert.equal(clientBSession, "client-b:session-1");
+
+    const first = manager.getNextAccount({
+      sessionKey: clientASession,
+      model: "gpt-5",
+    });
+    assert.equal(first.account?.token.email, "a@example.com");
+
+    manager.observeRetryAfter("b@example.com", "1");
+
+    const second = manager.getNextAccount({
+      sessionKey: clientBSession,
+      model: "gpt-5",
+    });
+    assert.equal(second.account?.token.email, "b@example.com");
+
+    const third = manager.getNextAccount({
+      sessionKey: clientASession,
+      model: "gpt-5.5",
+    });
+    assert.equal(third.account?.token.email, "a@example.com");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("codex smart routing records observed reset window from Retry-After", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      routingMode: "codex-smart",
+    });
+    manager.addAccount({
+      accessToken: "a",
+      refreshToken: "b",
+      email: "x@y.z",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "u",
+      provider: "codex",
+      planType: "plus",
+    });
+
+    manager.observeRetryAfter("x@y.z", "120");
+    const snap = manager.getSnapshots()[0];
+    assert.equal(snap.routing?.confidence, "observed");
+    assert.equal(snap.routing?.windowType, "plus_5h");
+    assert.ok(snap.routing?.resetAt);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -701,7 +956,10 @@ function makeCodexConfig(
     host: "127.0.0.1",
     port: 0,
     "auth-dir": "/tmp",
-    "api-keys": new Set(["k"]),
+    "api-key-rate-limit": {
+      "window-ms": 5 * 60 * 60 * 1000,
+      "max-requests": 300,
+    },
     "body-limit": "1mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -712,6 +970,9 @@ function makeCodexConfig(
       "messages-ms": 1000,
       "stream-messages-ms": 1000,
       "count-tokens-ms": 1000,
+    },
+    stats: {
+      enabled: true,
     },
     debug: "off",
   };
@@ -1013,13 +1274,20 @@ function makeNotifyConfig(): Config2 {
     host: "127.0.0.1",
     port: 18399,
     "auth-dir": "/tmp",
-    "api-keys": new Set(["sk-test"]),
+    "bootstrap-admin-key": "sk-test",
+    "api-key-rate-limit": {
+      "window-ms": 5 * 60 * 60 * 1000,
+      "max-requests": 300,
+    },
     "body-limit": "1mb",
     cloaking: { "cli-version": "2.1.88", entrypoint: "cli" },
     timeouts: {
       "messages-ms": 1000,
       "stream-messages-ms": 1000,
       "count-tokens-ms": 1000,
+    },
+    stats: {
+      enabled: true,
     },
     debug: "off",
   };
@@ -1056,7 +1324,7 @@ function captureLogs(): {
   };
 }
 
-test("notifyServerReload posts to /admin/reload with the first api-key as Bearer", async () => {
+test("notifyServerReload posts to /admin/reload with the bootstrap admin key as Bearer", async () => {
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
@@ -1117,7 +1385,7 @@ test("notifyServerReload warns on 401 (api-key mismatch)", async () => {
     cap.warns.some(
       (w) =>
         w.includes("rejected the reload (HTTP 401)") &&
-        w.includes("api-keys in config.yaml may differ"),
+        w.includes("admin key may have rotated"),
     ),
   );
 });

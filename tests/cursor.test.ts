@@ -50,7 +50,10 @@ function makeConfig(): Config {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": "/tmp/auth2api-test",
-    "api-keys": new Set(["test-key"]),
+    "api-key-rate-limit": {
+      "window-ms": 5 * 60 * 60 * 1000,
+      "max-requests": 300,
+    },
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -64,6 +67,9 @@ function makeConfig(): Config {
       "messages-ms": 120000,
       "stream-messages-ms": 600000,
       "count-tokens-ms": 30000,
+    },
+    stats: {
+      enabled: true,
     },
     debug: "off",
   };

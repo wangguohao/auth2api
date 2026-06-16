@@ -57,6 +57,7 @@ node dist/index.js --login
 
 # Codex (ChatGPT Plus/Pro)
 node dist/index.js --login --provider=codex
+node dist/index.js --login --provider=codex --manual --routingExtra='{"bias":1,"level":"pro"}'
 
 # Cursor (experimental; opens a browser to authorize your Cursor account)
 node dist/index.js --login --provider=cursor
@@ -67,6 +68,8 @@ node dist/index.js --login --provider=cursor --cursor-storage=/path/to/state.vsc
 ```
 
 Anthropic and Codex open a browser URL. After authorizing, the callback is handled automatically. The Anthropic flow uses port `54545`; the Codex flow uses port `1455` — make sure neither is blocked by your firewall. Cursor uses a different "deep-link" PKCE flow: it prints a `https://cursor.com/loginDeepControl?...` URL, you click "Yes, Log In" in your browser, and `auth2api` polls `api2.cursor.sh/auth/poll` until the token is issued — no callback port required. Pass `--cursor-import-local` (or `--cursor-storage=...`) if you'd rather pull the existing token out of your Cursor desktop install.
+
+`--routingExtra` is persisted with the token and hot-reloaded on `POST /admin/reload`. Supported fields are `bias` and `level` (`lite` or `pro`); `routing.level` defaults to `lite` when omitted. For codex routing, `routing.bias` is added to the smart-routing score; use it when you need a specific account to stay top priority.
 
 ### Manual mode (for remote servers)
 
@@ -89,7 +92,7 @@ You can run `--login` multiple times to add additional accounts (per provider). 
 node dist/index.js
 ```
 
-The server starts on `http://127.0.0.1:8317` by default. On first run, an API key is auto-generated and saved to `config.yaml`.
+The server starts on `http://127.0.0.1:8317` by default. On first run, a bootstrap admin key is auto-generated and saved to `config.yaml`. Client and admin API keys live in `<auth-dir>/api-keys.json` and are managed via `/admin/api-keys`.
 
 ## Configuration
 
@@ -101,8 +104,18 @@ port: 8317
 
 auth-dir: "~/.auth2api" # where OAuth tokens are stored
 
-api-keys:
-  - "your-api-key-here" # clients use this to authenticate
+bootstrap-admin-key: "sk-bootstrap-admin" # initial admin key; generated on first start if omitted
+
+api-key-tier-limits:
+  lite:
+    concurrency: 5 # default tier
+    max-requests-5h: 300 # 5-hour window for lite
+  pro:
+    concurrencyMultiplier: 2 # pro = lite * 2
+    max-requests-multiplier: 2
+  admin:
+    concurrencyMultiplier: 2 # admin = lite * 2
+    max-requests-multiplier: 2
 
 body-limit: "200mb" # maximum JSON request body size, useful for large-context usage
 
@@ -124,6 +137,8 @@ debug: "off" # off | errors | verbose
 - `off`: no extra logs
 - `errors`: log upstream/network failures and upstream error bodies
 - `verbose`: include `errors` logs plus per-request method, path, status, and duration
+
+`api-key-tier-limits` controls request concurrency and the 5-hour request cap by API key tier. `lite` is the base tier, `pro` and `admin` are derived from `lite` by multiplier and can be tuned independently. The current server applies these limits per authenticated key and returns HTTP `429` plus `Retry-After` when a tier is exhausted. `api-key-rate-limit` remains only for legacy config compatibility.
 
 Cursor's reverse-engineered headers can be overridden if the upstream version gate changes. `agent-base-url` is the legacy alias for the chat host; both keys point at the same backend now (`api2.cursor.sh`).
 
@@ -284,6 +299,18 @@ auth2api supports multiple Claude OAuth accounts. Each account is stored as a se
 - Per-account token usage (input, output, cache) is tracked and logged periodically
 - Use `/admin/accounts` to inspect all account states
 
+### Codex smart routing
+
+The `codex` provider now has a provider-local smart router layered on top of the
+existing account pool:
+
+- Session-level sticky routing prefers protocol-native conversation keys such as
+  `previous_response_id`, `conversation_id`, `session_id`
+- Sticky bindings stay in place until the bound account cools down or expires
+- Per-account routing metadata tracks inferred / observed reset windows
+- `Retry-After` responses immediately calibrate the next reset window
+- Only `codex` uses this logic; `anthropic` / `cursor` keep the original pool behaviour
+
 ## Admin status
 
 Use `/admin/accounts` with your configured API key to inspect the current account states:
@@ -305,7 +332,7 @@ Response shape (one entry per logged-in provider):
 }
 ```
 
-Each account snapshot carries availability, cooldown, failure counters, last refresh time, request statistics, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
+Each account snapshot carries availability, cooldown, failure counters, last refresh time, request statistics, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. When codex smart routing is enabled, snapshots also expose routing metadata (`resetAt`, `lastQuotaSyncAt`, `lastActiveAt`, `confidence`, `windowType`, `resetPeriodMs`) used for provider-local strategy routing. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
 
 ### Re-authenticating without restart
 
@@ -382,7 +409,7 @@ Failure modes of the auto-notify (printed by `--login`):
 
 - `Notified running auth2api server to reload tokens.` — success, server picked up the new token.
 - `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` — connection refused / timeout. Common case when no server is running; not an error.
-- `auth2api server is running but rejected the reload (HTTP 401/403). The api-keys in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
+- `auth2api server is running but rejected the reload (HTTP 401/403). The bootstrap admin key in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
 
 ## Tests
 

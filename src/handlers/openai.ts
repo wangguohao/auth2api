@@ -25,6 +25,7 @@ import {
   makeResponsesToChatState,
   drainCodexResponsesSse,
 } from "../upstream/responses-translator";
+import { buildSessionBindingKey, extractSessionKey } from "../routing/session";
 
 function openaiErrorBody(status: number, body: string): any {
   try {
@@ -70,6 +71,15 @@ async function proxyCodexChatCompletions(args: {
   stream: boolean;
 }): Promise<void> {
   const { req, resp, config, provider, body, model, stream } = args;
+  const selectionContext = {
+    sessionKey: buildSessionBindingKey(
+      resp.locals.authApiKeyHash,
+      extractSessionKey(req, body),
+    ),
+    model,
+    path: req.path,
+    apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+  };
   const responsesBody = normalizeCodexResponsesBody(
     chatToResponsesRequest(body),
   );
@@ -89,6 +99,7 @@ async function proxyCodexChatCompletions(args: {
 
   await proxyWithRetry("ChatCompletions(codex)", resp, config, {
     manager: provider.manager,
+    selectionContext,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -204,6 +215,15 @@ async function proxyCodexResponses(args: {
   stream: boolean;
 }): Promise<void> {
   const { req, resp, config, provider, body, model, stream } = args;
+  const selectionContext = {
+    sessionKey: buildSessionBindingKey(
+      resp.locals.authApiKeyHash,
+      extractSessionKey(req, body),
+    ),
+    model,
+    path: req.path,
+    apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+  };
   const responsesBody = normalizeCodexResponsesBody(body);
   delete responsesBody.max_output_tokens;
   delete responsesBody.parallel_tool_calls;
@@ -219,6 +239,7 @@ async function proxyCodexResponses(args: {
 
   await proxyWithRetry("Responses(codex)", resp, config, {
     manager: provider.manager,
+    selectionContext,
     upstream: (account, signal) =>
       provider.callMessages({
         body: responsesBody,
@@ -498,6 +519,15 @@ export function createChatCompletionsHandler(
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
+      const selectionContext = {
+        sessionKey: buildSessionBindingKey(
+          resp.locals.authApiKeyHash,
+          extractSessionKey(req, body),
+        ),
+        model,
+        path: req.path,
+        apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+      };
       tagStatsModel(resp, model, provider.id);
 
       // Cursor's wire protocol is closer to the OpenAI Responses API than to
@@ -551,6 +581,7 @@ export function createChatCompletionsHandler(
 
       await proxyWithRetry("ChatCompletions", resp, config, {
         manager: provider.manager,
+        selectionContext,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({
@@ -617,6 +648,15 @@ export function createResponsesHandler(
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
       const provider = registry.forModel(model);
+      const selectionContext = {
+        sessionKey: buildSessionBindingKey(
+          resp.locals.authApiKeyHash,
+          extractSessionKey(req, body),
+        ),
+        model,
+        path: req.path,
+        apiKeyTier: resp.locals.authApiKeyRecord?.tier,
+      };
       tagStatsModel(resp, model, provider.id);
 
       // The client-requested streaming intent is captured BEFORE we
@@ -650,6 +690,7 @@ export function createResponsesHandler(
         const normalizedBody = normalizeCursorResponsesBody(body);
         await proxyWithRetry("Responses", resp, config, {
           manager: provider.manager,
+          selectionContext,
           upstream: (account, signal) =>
             provider.callMessages({
               body: normalizedBody,
@@ -683,6 +724,7 @@ export function createResponsesHandler(
 
       await proxyWithRetry("Responses", resp, config, {
         manager: provider.manager,
+        selectionContext,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({

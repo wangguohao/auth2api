@@ -30,19 +30,21 @@ export function normalizeNotifyHost(configured: string | undefined): string {
  *   - ECONNREFUSED / ETC. → log "no server detected" (info)
  *   - other               → warn generic
  */
-export async function notifyServerReload(config: Config): Promise<void> {
+export async function notifyServerReload(
+  config: Config,
+  apiKey?: string,
+): Promise<void> {
   const host = normalizeNotifyHost(config.host);
   const port = config.port;
-  // Set preserves insertion order; pick the first configured key.
-  const apiKey = Array.from(config["api-keys"])[0];
-  if (!apiKey) return; // loadConfig always seeds at least one key
+  const resolvedApiKey = apiKey || config["bootstrap-admin-key"];
+  if (!resolvedApiKey) return;
   const url = `http://${host}:${port}/admin/reload`;
 
   let resp: Response;
   try {
     resp = await fetch(url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${resolvedApiKey}` },
       signal: AbortSignal.timeout(1500),
     });
   } catch (err: any) {
@@ -71,8 +73,7 @@ export async function notifyServerReload(config: Config): Promise<void> {
   if (resp.status === 401 || resp.status === 403) {
     console.warn(
       `auth2api server is running but rejected the reload (HTTP ${resp.status}). ` +
-        `The api-keys in config.yaml may differ from the running server's; ` +
-        `restart the server to pick up the new token.`,
+        `The admin key may have rotated; restart the server or refresh the client admin key.`,
     );
     return;
   }

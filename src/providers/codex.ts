@@ -27,6 +27,7 @@ export function buildCodexProvider(authDir: string): Provider {
       const token = await refreshCodexTokensWithRetry(rt);
       return { ...token, provider: "codex" };
     },
+    routingMode: "codex-smart",
     // Mirrors codex-rs/login/src/auth/manager.rs TOKEN_REFRESH_INTERVAL = 8 days.
     refreshPolicy: { kind: "since-last-refresh", maxAgeMs: 8 * 86_400_000 },
   });

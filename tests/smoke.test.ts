@@ -12,17 +12,39 @@ import { Config, loadConfig } from "../src/config";
 import { createServer } from "../src/server";
 import { saveToken } from "../src/auth/token-storage";
 import { TokenData } from "../src/auth/types";
+import { ApiKeyRegistry } from "../src/auth/api-key-registry";
 import { buildRegistry, ProviderRegistry } from "../src/providers/registry";
 import { refreshTokensWithRetry } from "../src/auth/oauth";
 
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 
-function makeConfig(authDir: string): Config {
+function makeConfig(
+  authDir: string,
+  overrides: Partial<Config["api-key-rate-limit"]> = {},
+): Config {
   return {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": authDir,
-    "api-keys": new Set(["test-key"]),
+    "bootstrap-admin-key": "sk-test",
+    "api-key-tier-limits": {
+      lite: {
+        concurrency: 5,
+        "max-requests-5h": overrides["max-requests"] ?? 300,
+      },
+      pro: {
+        concurrencyMultiplier: 2,
+        "max-requests-multiplier": 2,
+      },
+      admin: {
+        concurrencyMultiplier: 2,
+        "max-requests-multiplier": 2,
+      },
+    },
+    "api-key-rate-limit": {
+      "window-ms": overrides["window-ms"] ?? 5 * 60 * 60 * 1000,
+      "max-requests": overrides["max-requests"] ?? 300,
+    },
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -32,6 +54,9 @@ function makeConfig(authDir: string): Config {
       "messages-ms": 120000,
       "stream-messages-ms": 600000,
       "count-tokens-ms": 30000,
+    },
+    stats: {
+      enabled: true,
     },
     debug: "off",
   };
@@ -79,7 +104,55 @@ async function startApp(
   manager: AccountManager,
 ): Promise<http.Server> {
   const registry = makeRegistry(config["auth-dir"], manager);
-  const app = createServer(config, registry);
+  const tierLimits = config["api-key-tier-limits"] ?? {
+    lite: { concurrency: 5, "max-requests-5h": 300 },
+    pro: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+    admin: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+  };
+  const apiKeys = new ApiKeyRegistry(config["auth-dir"], {
+    bootstrapAdminKey: config["bootstrap-admin-key"] || "sk-test",
+    seededKeys: ["test-key"],
+    tierLimits: {
+      lite: {
+        concurrency: tierLimits.lite.concurrency ?? 5,
+        maxRequests5h: tierLimits.lite["max-requests-5h"] ?? 300,
+      },
+      pro: {
+        concurrency: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite.concurrency ?? 5) *
+              (tierLimits.pro.concurrencyMultiplier ?? 2),
+          ),
+        ),
+        maxRequests5h: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite["max-requests-5h"] ?? 300) *
+              (tierLimits.pro["max-requests-multiplier"] ?? 2),
+          ),
+        ),
+      },
+      admin: {
+        concurrency: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite.concurrency ?? 5) *
+              (tierLimits.admin.concurrencyMultiplier ?? 2),
+          ),
+        ),
+        maxRequests5h: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite["max-requests-5h"] ?? 300) *
+              (tierLimits.admin["max-requests-multiplier"] ?? 2),
+          ),
+        ),
+      },
+    },
+  });
+  apiKeys.load();
+  const app = createServer(config, registry, apiKeys);
   const server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return server;
@@ -90,7 +163,55 @@ async function startAppWithLoadedRegistry(
 ): Promise<http.Server> {
   const registry = buildRegistry(config["auth-dir"]);
   for (const provider of registry.all()) provider.manager.load();
-  const app = createServer(config, registry);
+  const tierLimits = config["api-key-tier-limits"] ?? {
+    lite: { concurrency: 5, "max-requests-5h": 300 },
+    pro: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+    admin: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+  };
+  const apiKeys = new ApiKeyRegistry(config["auth-dir"], {
+    bootstrapAdminKey: config["bootstrap-admin-key"] || "sk-test",
+    seededKeys: ["test-key"],
+    tierLimits: {
+      lite: {
+        concurrency: tierLimits.lite.concurrency ?? 5,
+        maxRequests5h: tierLimits.lite["max-requests-5h"] ?? 300,
+      },
+      pro: {
+        concurrency: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite.concurrency ?? 5) *
+              (tierLimits.pro.concurrencyMultiplier ?? 2),
+          ),
+        ),
+        maxRequests5h: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite["max-requests-5h"] ?? 300) *
+              (tierLimits.pro["max-requests-multiplier"] ?? 2),
+          ),
+        ),
+      },
+      admin: {
+        concurrency: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite.concurrency ?? 5) *
+              (tierLimits.admin.concurrencyMultiplier ?? 2),
+          ),
+        ),
+        maxRequests5h: Math.max(
+          1,
+          Math.round(
+            (tierLimits.lite["max-requests-5h"] ?? 300) *
+              (tierLimits.admin["max-requests-multiplier"] ?? 2),
+          ),
+        ),
+      },
+    },
+  });
+  apiKeys.load();
+  const app = createServer(config, registry, apiKeys);
   const server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return server;
@@ -265,7 +386,7 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
     server,
     method: "GET",
     path: "/v1/models",
-    headers: { "x-api-key": "test-key" },
+    headers: { "x-api-key": "sk-test" },
   });
 
   assert.equal(modelsResp.status, 200);
@@ -276,7 +397,7 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
     server,
     method: "GET",
     path: "/admin/accounts",
-    headers: { "x-api-key": "test-key" },
+    headers: { "x-api-key": "sk-test" },
   });
 
   assert.equal(adminResp.status, 200);
@@ -286,6 +407,112 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
     "test@example.com",
   );
   assert.equal(adminResp.body.providers.codex.account_count, 0);
+});
+
+test("rate limits each key tier with the configured 5-hour window", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    makeConfig(authDir, { "max-requests": 2, "window-ms": 5 * 60 * 60 * 1000 }),
+    manager,
+  );
+
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const first = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const second = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const third = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer test-key" },
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(third.status, 429);
+  assert.equal(
+    third.body.error.message,
+    "API key request limit exceeded for the configured tier window",
+  );
+  assert.equal(typeof third.headers["retry-after"], "string");
+});
+
+test("supports tier-based limits for lite and admin keys", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const config = makeConfig(authDir, { "max-requests": 1 });
+  config["bootstrap-admin-key"] = "admin-key";
+  config["api-key-tier-limits"] = {
+    lite: {
+      concurrency: 5,
+      "max-requests-5h": 1,
+    },
+    pro: {
+      concurrencyMultiplier: 2,
+      "max-requests-multiplier": 2,
+    },
+    admin: {
+      concurrencyMultiplier: 2,
+      "max-requests-multiplier": 2,
+    },
+  };
+  const server = await startApp(config, manager);
+
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const a1 = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const a2 = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const b1 = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer admin-key" },
+  });
+  const b2 = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer admin-key" },
+  });
+  const b3 = await requestJson({
+    server,
+    method: "GET",
+    path: "/v1/models",
+    headers: { Authorization: "Bearer admin-key" },
+  });
+
+  assert.equal(a1.status, 200);
+  assert.equal(a2.status, 429);
+  assert.equal(b1.status, 200);
+  assert.equal(b2.status, 200);
+  assert.equal(b3.status, 429);
 });
 
 test("proxies a non-stream chat completion through Claude OAuth token", async (t) => {
@@ -322,7 +549,7 @@ test("proxies a non-stream chat completion through Claude OAuth token", async (t
     server,
     method: "POST",
     path: "/v1/chat/completions",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
     body: {
       model: "claude-sonnet-4",
       messages: [{ role: "user", content: "hi" }],
@@ -389,7 +616,7 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
     server,
     method: "POST",
     path: "/v1/chat/completions",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
     body: {
       model: "claude-sonnet-4",
       messages: [{ role: "user", content: "refresh me" }],
@@ -409,7 +636,7 @@ test("refreshes the OAuth token after an upstream 401 and retries successfully",
     server,
     method: "GET",
     path: "/admin/accounts",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
   });
 
   assert.equal(adminResp.status, 200);
@@ -456,7 +683,7 @@ test("does not double-refresh when the second request also 401s (refresh-token-r
     server,
     method: "POST",
     path: "/v1/chat/completions",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
     body: {
       model: "claude-sonnet-4",
       messages: [{ role: "user", content: "fail me" }],
@@ -781,7 +1008,7 @@ test("multi-account admin endpoint shows all accounts", async (t) => {
     server,
     method: "GET",
     path: "/admin/accounts",
-    headers: { "x-api-key": "test-key" },
+    headers: { "x-api-key": "sk-test" },
   });
 
   assert.equal(resp.status, 200);
@@ -828,7 +1055,7 @@ test("multi-account proxies requests using sticky account until failover", async
     server,
     method: "POST",
     path: "/v1/chat/completions",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
     body: {
       model: "claude-sonnet-4",
       messages: [{ role: "user", content: "1" }],
@@ -919,9 +1146,9 @@ test("multi-account falls back to next account on rate limit", async (t) => {
   assert.ok(usedTokens.includes("token-b"));
 });
 
-// ── loadConfig: YAML api-keys array → Set ──
+// ── loadConfig: legacy api-keys entries are ignored ──
 
-test("loadConfig converts YAML api-keys array to Set", () => {
+test("loadConfig ignores legacy api-keys entries", () => {
   const configPath = path.join(os.tmpdir(), `auth2api-test-${Date.now()}.yaml`);
   fs.writeFileSync(
     configPath,
@@ -940,12 +1167,8 @@ test("loadConfig converts YAML api-keys array to Set", () => {
 
   try {
     const config = loadConfig(configPath);
-    assert.ok(config["api-keys"] instanceof Set);
-    assert.equal(config["api-keys"].size, 3);
-    assert.ok(config["api-keys"].has("sk-key-one"));
-    assert.ok(config["api-keys"].has("sk-key-two"));
-    assert.ok(config["api-keys"].has("sk-key-three"));
-    assert.ok(!config["api-keys"].has("sk-missing"));
+    assert.ok(config["bootstrap-admin-key"]);
+    assert.ok(config["bootstrap-admin-key"]!.startsWith("sk-"));
   } finally {
     fs.unlinkSync(configPath);
   }
@@ -1011,7 +1234,7 @@ test("POST /admin/reload reloads token from disk; subsequent request uses new be
     server,
     method: "POST",
     path: "/admin/reload",
-    headers: { Authorization: "Bearer test-key" },
+    headers: { Authorization: "Bearer sk-test" },
   });
   assert.equal(reloadResp.status, 200);
   assert.deepEqual(reloadResp.body.reloaded.anthropic.updated, [

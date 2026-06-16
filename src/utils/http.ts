@@ -3,6 +3,7 @@ import {
   AccountFailureKind,
   AccountManager,
   AccountResult,
+  AccountSelectionContext,
   AvailableAccount,
 } from "../accounts/manager";
 import { ProviderId } from "../auth/types";
@@ -82,6 +83,7 @@ export function accountUnavailable(
 
 export interface ProxyOptions {
   manager: AccountManager;
+  selectionContext?: AccountSelectionContext;
   upstream: (
     account: AvailableAccount,
     signal: AbortSignal,
@@ -140,7 +142,7 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const result = manager.getNextAccount();
+      const result = manager.getNextAccount(options.selectionContext);
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
       }
@@ -213,6 +215,7 @@ export async function proxyWithRetry(
         manager.provider,
       );
       lastRetryAfter = upstream.headers.get("retry-after");
+      (manager as any).observeRetryAfter?.(account.token.email, lastRetryAfter);
       try {
         lastErrBody = await upstream.text();
         if (isDebugLevel(config.debug, "errors")) {

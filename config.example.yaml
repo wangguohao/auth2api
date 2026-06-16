@@ -4,9 +4,22 @@ port: 8317
 # Directory to store OAuth tokens
 auth-dir: "~/.auth2api"
 
-# API keys for client authentication (clients use these to access this proxy)
-api-keys:
-  - "your-api-key-here"
+# Bootstrap admin key used to manage API keys and trigger reloads.
+# If omitted, auth2api will generate one and write it back on first start.
+bootstrap-admin-key: "sk-bootstrap-admin"
+
+# API key tier limits.
+# lite is the base tier; pro/admin are derived from lite by multiplier.
+api-key-tier-limits:
+  lite:
+    concurrency: 5
+    max-requests-5h: 300
+  pro:
+    concurrencyMultiplier: 2
+    max-requests-multiplier: 2
+  admin:
+    concurrencyMultiplier: 2
+    max-requests-multiplier: 2
 
 # Maximum JSON request body size
 body-limit: "200mb"

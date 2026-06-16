@@ -1,11 +1,13 @@
 import crypto from "crypto";
 import readline from "readline";
-import { Config, loadConfig, resolveAuthDir } from "./config";
-import { ProviderId } from "./auth/types";
+import { Config, loadConfig, resolveAuthDir, resolveTierLimit } from "./config";
+import { ProviderId, RoutingConfig } from "./auth/types";
 import { generatePKCECodes } from "./auth/pkce";
 import { waitForCallback } from "./auth/callback-server";
 import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
 import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+import { ApiKeyRegistry } from "./auth/api-key-registry";
+import { applyRoutingExtra, parseRoutingExtraArg } from "./auth/routing-extra";
 import { buildRegistry, ProviderRegistry } from "./providers/registry";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
@@ -35,26 +37,46 @@ function parseProviderArg(args: string[]): ProviderId {
   );
 }
 
+function buildApiKeyRegistry(config: Config, authDir: string): ApiKeyRegistry {
+  const tierLimits = config["api-key-tier-limits"] ?? {
+    lite: { concurrency: 5, "max-requests-5h": 300 },
+    pro: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+    admin: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
+  };
+  return new ApiKeyRegistry(authDir, {
+    bootstrapAdminKey: config["bootstrap-admin-key"],
+    tierLimits: {
+      lite: resolveTierLimit(tierLimits, "lite"),
+      pro: resolveTierLimit(tierLimits, "pro"),
+      admin: resolveTierLimit(tierLimits, "admin"),
+    },
+  });
+}
+
 async function importCursorLogin(
   config: Config,
   registry: ProviderRegistry,
+  apiKeys: ApiKeyRegistry,
   storagePath?: string,
+  extra?: RoutingConfig,
 ): Promise<void> {
   const provider = registry.get("cursor");
   const tokenData = importCursorTokenFromLocalStorage(storagePath);
-  provider.manager.addAccount(tokenData);
+  provider.manager.addAccount(applyRoutingExtra(tokenData, extra));
   console.log("\nCursor local login imported.");
   console.log(`Account: ${tokenData.email}`);
   console.log(`Token expires: ${tokenData.expiresAt}`);
   console.log(
     "Note: Cursor provider support is experimental and uses non-public APIs.",
   );
-  await notifyServerReload(config);
+  await notifyServerReload(config, apiKeys.getAdminSecret() || undefined);
 }
 
 async function browserCursorLogin(
   config: Config,
   registry: ProviderRegistry,
+  apiKeys: ApiKeyRegistry,
+  extra?: RoutingConfig,
 ): Promise<void> {
   const provider = registry.get("cursor");
   console.log("\nLogging in to cursor (browser flow).");
@@ -68,21 +90,23 @@ async function browserCursorLogin(
       );
     },
   });
-  provider.manager.addAccount(result.token);
+  provider.manager.addAccount(applyRoutingExtra(result.token, extra));
   console.log("Cursor browser login complete.");
   console.log(`Account: ${result.token.email}`);
   console.log(`Token expires: ${result.token.expiresAt}`);
   console.log(
     "Note: Cursor provider support is experimental and uses non-public APIs.",
   );
-  await notifyServerReload(config);
+  await notifyServerReload(config, apiKeys.getAdminSecret() || undefined);
 }
 
 async function doLogin(
   config: Config,
   registry: ProviderRegistry,
+  apiKeys: ApiKeyRegistry,
   providerId: ProviderId,
   manual: boolean,
+  extra?: RoutingConfig,
 ): Promise<void> {
   const provider = registry.get(providerId);
 
@@ -136,10 +160,10 @@ async function doLogin(
     pkce,
   );
   if (!tokenData.provider) tokenData.provider = provider.id;
-  provider.manager.addAccount(tokenData);
+  provider.manager.addAccount(applyRoutingExtra(tokenData, extra));
   console.log(`\nLogin successful! Account: ${tokenData.email}`);
   console.log(`Token expires: ${tokenData.expiresAt}`);
-  await notifyServerReload(config);
+  await notifyServerReload(config, apiKeys.getAdminSecret() || undefined);
 }
 
 async function startServer(): Promise<void> {
@@ -148,7 +172,8 @@ async function startServer(): Promise<void> {
     ?.split("=")[1];
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
-
+  const apiKeys = buildApiKeyRegistry(config, authDir);
+  apiKeys.load();
   const registry = buildRegistry(authDir);
   for (const p of registry.all()) p.manager.load();
 
@@ -175,7 +200,7 @@ async function startServer(): Promise<void> {
     statsRecorder.start(authDir);
   }
 
-  const app = createServer(config, registry, statsRecorder);
+  const app = createServer(config, registry, apiKeys, statsRecorder);
   const host = config.host || "127.0.0.1";
   const port = config.port;
 
@@ -212,6 +237,8 @@ async function main(): Promise<void> {
   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
+  const apiKeys = buildApiKeyRegistry(config, authDir);
+  apiKeys.load();
 
   if (args.includes("--login")) {
     const manual = args.includes("--manual");
@@ -219,16 +246,21 @@ async function main(): Promise<void> {
     const cursorStorage = args
       .find((a) => a.startsWith("--cursor-storage="))
       ?.split("=", 2)[1];
+    const extra = parseRoutingExtraArg(
+      args.find((a) => a.startsWith("--routingExtra="))?.slice(
+        "--routingExtra=".length,
+      ),
+    );
     const registry = buildRegistry(authDir);
     for (const p of registry.all()) p.manager.load();
     if (providerId === "cursor") {
       if (cursorStorage || args.includes("--cursor-import-local")) {
-        await importCursorLogin(config, registry, cursorStorage);
+        await importCursorLogin(config, registry, apiKeys, cursorStorage, extra);
       } else {
-        await browserCursorLogin(config, registry);
+        await browserCursorLogin(config, registry, apiKeys, extra);
       }
     } else {
-      await doLogin(config, registry, providerId, manual);
+      await doLogin(config, registry, apiKeys, providerId, manual, extra);
     }
   } else {
     await startServer();
