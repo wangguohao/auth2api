@@ -336,7 +336,7 @@ Each account snapshot carries availability, cooldown, failure counters, last ref
 
 ### API key management
 
-`/admin/api-keys` supports list, create, enable, and disable operations. The `id` field returned by `GET /admin/api-keys` is the identifier used by the enable/disable actions.
+`/admin/api-keys` supports list, create, enable, and disable operations. The `id` field returned by `GET /admin/api-keys` is the identifier used by the enable/disable actions. API key `name` values must be unique when creating keys; if omitted, the server generates a unique default from the tier.
 
 ```bash
 curl http://127.0.0.1:8317/admin/api-keys \
@@ -383,11 +383,11 @@ Reload semantics are **upsert only**: new token files on disk are added to the i
 
 ### Call statistics: `/admin/stats`
 
-Every request that passes API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts.
+Every `/v1` request that passes API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts. `/admin` management endpoints are not counted.
 
 `GET /admin/stats` returns three independent aggregate views plus a global `totals`:
 
-- `byClient[apiKeyHash]` — keyed by `sha256(api-key)`; tracks requests, success / failure counts, the five token counters, total latency, and the last seen IP / User-Agent.
+- `byClient[name]` — keyed by API key `name`; tracks requests, success / failure counts, the five token counters, total latency, and the last seen IP / User-Agent.
 - `byAccount["<provider>:<email>"]` — keyed by upstream OAuth account.
 - `byApi["<endpoint>|<model>|<provider>"]` — keyed by endpoint × model × provider.
 
@@ -399,8 +399,8 @@ curl http://127.0.0.1:8317/admin/stats \
 ```json
 {
   "byClient": {
-    "8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f6789": {
-      "apiKeyShort": "8f2a1d3c4e5f",
+    "team-a": {
+      "name": "team-a",
       "requests": 142, "successes": 140, "failures": 2,
       "totalInputTokens": 12345, "totalOutputTokens": 6789,
       "totalCacheReadInputTokens": 0, "totalLatencyMs": 286430,

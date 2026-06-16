@@ -124,6 +124,7 @@ export function createServer(
     // upstream account / model / usage fields.
     res.locals.authApiKey = key;
     res.locals.authApiKeyHash = hashApiKey(key);
+    res.locals.authApiKeyName = auth.record.name || auth.record.id;
     res.locals.authApiKeyTier = auth.record.tier;
     res.locals.authApiKeyRecord = auth.record;
     if (statsRecorder) {
@@ -131,6 +132,7 @@ export function createServer(
       const ua = (req.headers["user-agent"] as string) || "";
       res.locals.stats = {
         apiKeyHash: res.locals.authApiKeyHash,
+        apiKeyName: res.locals.authApiKeyName,
         ip,
         ua,
         endpoint: `${req.method} ${req.baseUrl}${req.path}`,
@@ -235,6 +237,7 @@ export function createServer(
       const ctx = res.locals.stats as
         | {
             apiKeyHash: string;
+            apiKeyName: string;
             ip: string;
             ua: string;
             endpoint: string;
@@ -252,6 +255,7 @@ export function createServer(
         (res.statusCode >= 200 && res.statusCode < 300 ? "success" : "failure");
       statsRecorder.record({
         apiKeyHash: ctx.apiKeyHash,
+        apiKeyName: ctx.apiKeyName,
         ip: ctx.ip,
         ua: ctx.ua,
         endpoint: ctx.endpoint,
@@ -297,10 +301,9 @@ export function createServer(
   };
 
   app.use("/admin", requireAdminApiKey);
-  app.use("/admin", statsFinishMiddleware);
 
   // GET /admin/stats — three-axis aggregated call statistics.
-  //   byClient — keyed by sha256(api-key); show short hex prefix to operator
+  //   byClient — keyed by API key name
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
   app.get(ROUTES.adminStats.path, (_req, res) => {
@@ -373,8 +376,16 @@ export function createServer(
         generated_at: new Date().toISOString(),
       });
     } catch (err: any) {
+      const message = err?.message || "Failed to persist API key";
+      if (
+        message.startsWith("API key name already exists:") ||
+        message === "API key name cannot be empty"
+      ) {
+        res.status(400).json({ error: { message } });
+        return;
+      }
       res.status(500).json({
-        error: { message: err?.message || "Failed to persist API key" },
+        error: { message },
       });
     }
   });
@@ -428,6 +439,7 @@ export function createServer(
     const reloaded: Record<string, unknown> = {};
     try {
       await apiKeyRegistry.reload();
+      statsRecorder?.setApiKeyNamesByHash(apiKeyRegistry.getNameByHash());
       reloaded["api-keys"] = { ok: true };
     } catch (err: any) {
       reloaded["api-keys"] = { error: err?.message || String(err) };

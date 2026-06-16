@@ -335,7 +335,7 @@ curl http://127.0.0.1:8317/admin/accounts \
 
 ### API key 管理
 
-`/admin/api-keys` 支持列表、创建、启用、禁用 4 个动作。`GET /admin/api-keys` 返回的 `id` 就是启用/禁用接口使用的标识。
+`/admin/api-keys` 支持列表、创建、启用、禁用 4 个动作。`GET /admin/api-keys` 返回的 `id` 就是启用/禁用接口使用的标识。创建 API key 时 `name` 必须唯一；未传 `name` 时服务端会按 tier 生成唯一默认名。
 
 ```bash
 curl http://127.0.0.1:8317/admin/api-keys \
@@ -382,11 +382,11 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 ### 调用统计 `/admin/stats`
 
-每一个通过 API key 鉴权的请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。
+每一个通过 API key 鉴权的 `/v1` 请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。`/admin` 管理接口不计入统计。
 
 `GET /admin/stats` 返回三个互相独立的聚合视图：
 
-- `byClient[apiKeyHash]` —— 按客户端（sha256(API key)）聚合：请求数、成功/失败、五项 token、累计延迟、最近一次 IP 与 User-Agent
+- `byClient[name]` —— 按 API key 的 `name` 聚合：请求数、成功/失败、五项 token、累计延迟、最近一次 IP 与 User-Agent
 - `byAccount["<provider>:<email>"]` —— 按上游 OAuth 账号聚合
 - `byApi["<endpoint>|<model>|<provider>"]` —— 按 endpoint × model × provider 三元组聚合
 - `totals` —— 全局合计
@@ -399,8 +399,8 @@ curl http://127.0.0.1:8317/admin/stats \
 ```json
 {
   "byClient": {
-    "8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f8f2a1d3c4e5f6789": {
-      "apiKeyShort": "8f2a1d3c4e5f",
+    "team-a": {
+      "name": "team-a",
       "requests": 142, "successes": 140, "failures": 2,
       "totalInputTokens": 12345, "totalOutputTokens": 6789,
       "totalCacheReadInputTokens": 0, "totalLatencyMs": 286430,

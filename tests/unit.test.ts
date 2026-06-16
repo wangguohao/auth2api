@@ -581,6 +581,112 @@ test("ApiKeyRegistry supports enabling and disabling non-admin keys", () => {
   }
 });
 
+test("ApiKeyRegistry rejects duplicate API key names", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    registry.createKey({ tier: "lite", name: "client" });
+    assert.throws(
+      () => registry.createKey({ tier: "pro", name: " client " }),
+      /API key name already exists: client/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("ApiKeyRegistry generates unique default names", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    const registry = new ApiKeyRegistry(tmpDir, {
+      bootstrapAdminKey: "sk-bootstrap-admin",
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    const first = registry.createKey({ tier: "lite" });
+    const second = registry.createKey({ tier: "lite" });
+    assert.equal(first.record.name, "lite");
+    assert.equal(second.record.name, "lite-2");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("ApiKeyRegistry reconciles duplicate names on load", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
+  try {
+    fs.writeFileSync(
+      path.join(tmpDir, "api-keys.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          keys: [
+            {
+              id: "ak_1",
+              secret: "sk-1",
+              tier: "lite",
+              name: "client",
+              enabled: true,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "ak_2",
+              secret: "sk-2",
+              tier: "lite",
+              name: " client ",
+              enabled: true,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "ak_3",
+              secret: "sk-3",
+              tier: "pro",
+              name: "   ",
+              enabled: true,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const registry = new ApiKeyRegistry(tmpDir, {
+      tierLimits: {
+        lite: { concurrency: 5, maxRequests5h: 300 },
+        pro: { concurrency: 10, maxRequests5h: 600 },
+        admin: { concurrency: 10, maxRequests5h: 600 },
+      },
+    });
+    registry.load();
+
+    assert.deepEqual(
+      registry.list().map((k) => k.name),
+      ["client", "client-2", "pro"],
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("ApiKeyRegistry reload flushes pending changes before reading disk", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-api-keys-"));
   try {
@@ -1283,6 +1389,7 @@ function makeStatsEvent(over: Partial<StatsEvent> = {}): StatsEvent {
     v: 1,
     ts: "2026-05-09T12:00:00.000Z",
     apiKeyHash: "a".repeat(64),
+    apiKeyName: "client-a",
     ip: "127.0.0.1",
     ua: "test-ua",
     endpoint: "POST /v1/chat/completions",
@@ -1324,9 +1431,9 @@ test("StatsRecorder aggregates across all three views", () => {
   assert.equal(snapshot.totals.totalOutputTokens, 10);
   assert.equal(snapshot.totals.firstSeenAt, "2026-05-09T12:00:00.000Z");
 
-  const clientKey = "a".repeat(64);
+  const clientKey = "client-a";
   assert.equal(snapshot.byClient[clientKey].requests, 3);
-  assert.equal(snapshot.byClient[clientKey].apiKeyShort, "a".repeat(12));
+  assert.equal(snapshot.byClient[clientKey].name, "client-a");
 
   const accKey = "anthropic:alice@example.com";
   assert.equal(snapshot.byAccount[accKey].requests, 3);
@@ -1342,6 +1449,7 @@ test("StatsRecorder splits buckets by client / account / api key", () => {
   recorder.applyEvent(
     makeStatsEvent({
       apiKeyHash: "b".repeat(64),
+      apiKeyName: "client-b",
       accountEmail: "bob@example.com",
       endpoint: "POST /v1/messages",
       model: "claude-opus-4-7",
@@ -1369,7 +1477,50 @@ test("StatsRecorder skips byAccount when provider/email missing", () => {
   assert.equal(snapshot.totals.requests, 1);
 });
 
-test("createServer stats endpoint records mounted route prefix", async () => {
+test("StatsRecorder ignores admin endpoints during replay", () => {
+  const recorder = new StatsRecorder();
+  recorder.applyEvent(
+    makeStatsEvent({
+      endpoint: "GET /admin/stats",
+      model: null,
+      provider: null,
+      accountEmail: null,
+      usage: null,
+    }),
+  );
+  const snapshot = recorder.getSnapshot();
+  assert.equal(snapshot.totals.requests, 0);
+  assert.deepEqual(snapshot.byApi, {});
+});
+
+test("StatsRecorder maps legacy client hashes to API key names", () => {
+  const recorder = new StatsRecorder(
+    new Map([[hashApiKey("sk-client"), "client"]]),
+  );
+  recorder.applyEvent(
+    makeStatsEvent({
+      apiKeyHash: hashApiKey("sk-client"),
+      apiKeyName: undefined,
+    }),
+  );
+  const snapshot = recorder.getSnapshot();
+  assert.equal(snapshot.byClient.client.requests, 1);
+  assert.equal(snapshot.byClient.client.name, "client");
+});
+
+test("StatsRecorder omits byClient for unmapped legacy hashes", () => {
+  const recorder = new StatsRecorder();
+  recorder.applyEvent(
+    makeStatsEvent({
+      apiKeyName: undefined,
+    }),
+  );
+  const snapshot = recorder.getSnapshot();
+  assert.equal(snapshot.totals.requests, 1);
+  assert.deepEqual(snapshot.byClient, {});
+});
+
+test("createServer stats does not record admin endpoints", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
@@ -1406,7 +1557,8 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       headers,
     });
     const body = await second.json();
-    assert.equal(body.byApi["GET /admin/stats|unknown|unknown"].requests, 1);
+    assert.deepEqual(body.byApi, {});
+    assert.equal(body.totals.requests, 0);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await recorder.stop();
@@ -1549,6 +1701,7 @@ test("createServer stats records api-key rate-limited requests", async () => {
       .split("\n")
       .map((line) => JSON.parse(line));
     assert.equal(events.length, 2);
+    assert.equal(events[0].apiKeyName, "lite");
     assert.equal(events[1].statusCode, 429);
     assert.equal(events[1].failureKind, "rate_limit");
   } finally {

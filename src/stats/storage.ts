@@ -49,6 +49,7 @@ function isStatsEvent(value: unknown): value is StatsEvent {
     value.v === 1 &&
     typeof value.ts === "string" &&
     typeof value.apiKeyHash === "string" &&
+    (value.apiKeyName === undefined || typeof value.apiKeyName === "string") &&
     typeof value.ip === "string" &&
     typeof value.ua === "string" &&
     typeof value.endpoint === "string" &&

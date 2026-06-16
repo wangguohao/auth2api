@@ -4,6 +4,7 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { generateApiKey } from "../config";
 import { ApiKeyFile, ApiKeyRecord, ApiKeyTier } from "./types";
+import { hashApiKey } from "../utils/common";
 
 export interface ApiKeyAuthContext {
   key: string;
@@ -54,6 +55,10 @@ function isFile(value: unknown): value is ApiKeyFile {
 
 function defaultNameForTier(tier: ApiKeyTier): string {
   return tier === "admin" ? "bootstrap-admin" : tier;
+}
+
+function normalizeName(name: string): string {
+  return name.trim();
 }
 
 function newId(prefix: string): string {
@@ -118,6 +123,7 @@ export class ApiKeyRegistry {
     }
 
     this.keys = file.keys;
+    changed = this.reconcileNames(this.keys) || changed;
     changed = this.reconcileAdminState(this.keys) || changed;
     this.rebuildIndex();
     if (changed || !fs.existsSync(this.filePath)) {
@@ -250,16 +256,70 @@ export class ApiKeyRegistry {
     return this.keys.map((k) => ({ ...k }));
   }
 
+  private hasName(name: string): boolean {
+    return this.keys.some((k) => normalizeName(k.name || "") === name);
+  }
+
+  private uniqueDefaultName(base: string): string {
+    let candidate = base;
+    let suffix = 2;
+    while (this.hasName(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix++;
+    }
+    return candidate;
+  }
+
+  private reconcileNames(records: ApiKeyRecord[]): boolean {
+    const used = new Set<string>();
+    let changed = false;
+    for (const rec of records) {
+      const base =
+        normalizeName(rec.name || defaultNameForTier(rec.tier)) ||
+        defaultNameForTier(rec.tier);
+      let candidate = base;
+      let suffix = 2;
+      while (used.has(candidate)) {
+        candidate = `${base}-${suffix}`;
+        suffix++;
+      }
+      used.add(candidate);
+      if (rec.name !== candidate) {
+        rec.name = candidate;
+        rec.updatedAt = nowIso();
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  getNameByHash(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const rec of this.keys) {
+      if (rec.name) map.set(hashApiKey(rec.secret), rec.name);
+    }
+    return map;
+  }
+
   createKey(input: { tier?: ApiKeyTier; name?: string; enabled?: boolean }): {
     record: ApiKeyRecord;
     secret: string;
   } {
     const tier = input.tier ?? "lite";
+    const explicitName =
+      input.name === undefined ? undefined : normalizeName(input.name);
+    if (explicitName !== undefined && explicitName.length === 0) {
+      throw new Error("API key name cannot be empty");
+    }
+    const name = explicitName ?? this.uniqueDefaultName(tier);
+    if (this.hasName(name)) {
+      throw new Error(`API key name already exists: ${name}`);
+    }
     const secret = generateApiKey();
     const record = this.makeRecord(
       secret,
       tier,
-      input.name ?? tier,
+      name,
       input.enabled ?? true,
     );
 

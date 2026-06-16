@@ -12,6 +12,7 @@ export interface StatsEvent {
   v: 1;
   ts: string;
   apiKeyHash: string;
+  apiKeyName?: string;
   ip: string;
   ua: string;
   endpoint: string;
@@ -40,7 +41,7 @@ interface BaseBucket {
 }
 
 export interface ClientBucket extends BaseBucket {
-  apiKeyShort: string;
+  name: string;
   lastIp: string;
   lastUa: string;
 }
@@ -97,8 +98,12 @@ function applyBaseDelta(b: BaseBucket, ev: StatsEvent): void {
   b.lastSeenAt = ev.ts;
 }
 
+function shouldRecordStatsEvent(ev: Pick<StatsEvent, "endpoint">): boolean {
+  return !/^[A-Z]+ \/admin(?:\/|$)/.test(ev.endpoint);
+}
+
 /**
- * Three independent aggregate views — keyed by client (API key hash),
+ * Three independent aggregate views — keyed by client (API key name),
  * upstream account (provider + email), and API surface (endpoint + model
  * + provider). Each request increments exactly one bucket per view, so
  * memory usage is O(unique clients + unique accounts + unique
@@ -109,9 +114,18 @@ export class StatsRecorder {
   private byAccount = new Map<string, AccountBucket>();
   private byApi = new Map<string, ApiBucket>();
   private totals: BaseBucket = emptyBucket(new Date().toISOString());
+  private apiKeyNamesByHash = new Map<string, string>();
 
   private appender: StatsAppender | null = null;
   private enabled = false;
+
+  constructor(apiKeyNamesByHash?: Map<string, string>) {
+    if (apiKeyNamesByHash) this.apiKeyNamesByHash = new Map(apiKeyNamesByHash);
+  }
+
+  setApiKeyNamesByHash(apiKeyNamesByHash: Map<string, string>): void {
+    this.apiKeyNamesByHash = new Map(apiKeyNamesByHash);
+  }
 
   /**
    * Replay JSONL into the in-memory aggregate, then open the append
@@ -155,6 +169,7 @@ export class StatsRecorder {
       ts: new Date().toISOString(),
       ...input,
     };
+    if (!shouldRecordStatsEvent(event)) return;
     this.applyEvent(event);
     if (this.appender) {
       try {
@@ -184,22 +199,25 @@ export class StatsRecorder {
 
   /** Test/replay-only entry point — does NOT touch the disk. */
   applyEvent(ev: StatsEvent): void {
+    if (!shouldRecordStatsEvent(ev)) return;
     applyBaseDelta(this.totals, ev);
 
-    const clientKey = ev.apiKeyHash;
-    let cb = this.byClient.get(clientKey);
-    if (!cb) {
-      cb = {
-        ...emptyBucket(ev.ts),
-        apiKeyShort: ev.apiKeyHash.slice(0, 12),
-        lastIp: ev.ip,
-        lastUa: ev.ua,
-      };
-      this.byClient.set(clientKey, cb);
+    const clientKey = ev.apiKeyName || this.apiKeyNamesByHash.get(ev.apiKeyHash);
+    if (clientKey) {
+      let cb = this.byClient.get(clientKey);
+      if (!cb) {
+        cb = {
+          ...emptyBucket(ev.ts),
+          name: clientKey,
+          lastIp: ev.ip,
+          lastUa: ev.ua,
+        };
+        this.byClient.set(clientKey, cb);
+      }
+      cb.lastIp = ev.ip || cb.lastIp;
+      cb.lastUa = ev.ua || cb.lastUa;
+      applyBaseDelta(cb, ev);
     }
-    cb.lastIp = ev.ip || cb.lastIp;
-    cb.lastUa = ev.ua || cb.lastUa;
-    applyBaseDelta(cb, ev);
 
     if (ev.provider && ev.accountEmail) {
       const accKey = `${ev.provider}:${ev.accountEmail}`;

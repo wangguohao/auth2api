@@ -200,7 +200,7 @@ async function startServer(): Promise<void> {
 
   let statsRecorder: StatsRecorder | undefined;
   if (config.stats.enabled) {
-    statsRecorder = new StatsRecorder();
+    statsRecorder = new StatsRecorder(apiKeys.getNameByHash());
     statsRecorder.start(authDir);
   }
 
