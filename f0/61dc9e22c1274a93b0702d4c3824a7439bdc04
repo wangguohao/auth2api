@@ -1,0 +1,184 @@
+config.example.yaml
+  s_425c6a8daa9f0b::t_5d16bd9a4fc6a7 7,9-22
+  s_425c6a8daa9f0b::t_9daf7256942740 8
+src/config.ts
+  s_5cd87d3d145e7f::t_f6c966066040af 63-67,73-74,83,115-118,179-181,205
+  s_c91e71fd808dfa::t_dd5a681cd5167a 68-72,182-187,196,226-235,256
+  s_425c6a8daa9f0b::t_f99dae95665f83 174
+  s_425c6a8daa9f0b::t_3bb8534b0843dc 192,195,199,203
+  s_425c6a8daa9f0b::t_5d9bf4b22a5013 81-82
+  s_425c6a8daa9f0b::t_c12c31ca106059 52-62,100-114,188-190,193,197,200-201,204,214-216,220-222,236-255
+  s_425c6a8daa9f0b::t_a4dd2b764da879 91-94,172-173,178,225
+  s_425c6a8daa9f0b::t_74feefa190c377 175,191,194,198,202
+tests/unit.test.ts
+  s_425c6a8daa9f0b::t_a836d472fba6f6 1400-1401,1438
+  s_425c6a8daa9f0b::t_5870b21f4f302b 427-428,436
+  s_c91e71fd808dfa::t_442499e155afed 1395-1398,1409-1431,1433-1437,1439-1467
+  s_425c6a8daa9f0b::t_ebb592117de7b5 31,57-58,60-64,67-73
+  s_425c6a8daa9f0b::t_bb6892ff100ab4 29
+  s_425c6a8daa9f0b::t_27209b85a23806 550-584
+  s_5cd87d3d145e7f::t_f6c966066040af 424-425,445-454,458-465
+  s_425c6a8daa9f0b::t_1edfe9824d673e 1399,1402-1408
+  s_425c6a8daa9f0b::t_2a23c027bc8e6b 503-549
+  s_425c6a8daa9f0b::t_a175e56da65cc1 59
+  s_c91e71fd808dfa::t_dd5a681cd5167a 23-28,455-457,466-500
+  s_c91e71fd808dfa::t_1c738a24f13b4d 30,48-54
+  s_425c6a8daa9f0b::t_3c3d52337050e6 55-56,65-66
+  s_425c6a8daa9f0b::t_a9efa1d1a7c071 1174-1188
+  s_425c6a8daa9f0b::t_995c8bfd7809a4 1285,1306,1330,1351,1432
+  s_5cd87d3d145e7f::t_1115ea0ac5a156 1291-1294,1336-1339
+src/auth/api-key-registry.ts
+  s_425c6a8daa9f0b::t_c966bf0062bae1 78-80,82-93
+  s_425c6a8daa9f0b::t_35f8e80d003b35 1-77,81,94-220
+src/utils/http.ts
+  s_2e5055ceb5aa08::t_8677e4c794a468 6,86,145
+  s_2e5055ceb5aa08::t_87146bf91a6711 218
+src/accounts/manager.ts
+  s_2e5055ceb5aa08::t_4935ae9452f2c8 379-382,384-385,481-495,498-514,520,536-568
+  s_425c6a8daa9f0b::t_d23a65cc762358 921
+  s_425c6a8daa9f0b::t_ad4415ccc20f65 496-497,515-519
+  s_425c6a8daa9f0b::t_d7fe66557077cc 923,1020-1031
+  s_425c6a8daa9f0b::t_2cc1e98a50075a 688
+  s_425c6a8daa9f0b::t_a9e6accd08ac13 1-7,66,158
+  s_425c6a8daa9f0b::t_483542bd08c6b6 398-399,401,419-420,422
+  s_425c6a8daa9f0b::t_a45afedb5b8867 900-917
+  s_2e5055ceb5aa08::t_418d4db527d753 62-65,67-88,136,161,203
+  s_2e5055ceb5aa08::t_7f207a58e6b0a2 244-245,252
+  s_425c6a8daa9f0b::t_476bcb892e0eb8 437-448,452-456,459,521-535
+  s_2e5055ceb5aa08::t_2f4007358477dd 690-693
+  s_2e5055ceb5aa08::t_027c4fbbc1e687 875-883,886-899,918-920,922,924-1019,1032-1043
+  s_2e5055ceb5aa08::t_59132f3f3b3e53 576-578,593,624,648-662
+  s_425c6a8daa9f0b::t_31c0062d4cbb4a 383,386,400,421,436,449-450
+README_CN.md
+  s_425c6a8daa9f0b::t_89f581233f4292 107
+  s_425c6a8daa9f0b::t_9c5113793c3059 60,72,108-118,141
+  s_425c6a8daa9f0b::t_9bcee0847f53d8 412
+  s_425c6a8daa9f0b::t_e8baa9365371ab 95
+  s_2e5055ceb5aa08::t_7ea134b515cf30 302-305,308-312,334
+  s_2e5055ceb5aa08::t_394b049f4bc7c0 306-307
+src/utils/notify-reload.ts
+  s_425c6a8daa9f0b::t_01fc1d664b7fae 33-36,76
+  s_425c6a8daa9f0b::t_5517d979f81d5c 39
+  s_425c6a8daa9f0b::t_8e3860cd180d33 40,47
+tests/cursor.test.ts
+  s_5cd87d3d145e7f::t_f6c966066040af 53-56,71-72
+src/routing/session.ts
+  s_2e5055ceb5aa08::t_d6516858e63e71 1-11,14-16,18
+  s_2e5055ceb5aa08::t_99828dc140aeeb 17
+  s_2e5055ceb5aa08::t_35d80ff8d62d88 12-13
+  s_c91e71fd808dfa::t_187d0c1181a02f 19-26
+README.md
+  s_425c6a8daa9f0b::t_859932784bc36b 95
+  s_2e5055ceb5aa08::t_6f854e1324b629 307-308
+  s_2e5055ceb5aa08::t_446670ffdadf73 302-306,309-313,335
+  s_425c6a8daa9f0b::t_3207ad0a73b7a4 412
+  s_425c6a8daa9f0b::t_4ff8b5c632b949 107
+  s_425c6a8daa9f0b::t_59211b3d9aad81 60,72,108-118,141
+src/server.ts
+  s_c91e71fd808dfa::t_187d0c1181a02f 159-161,378
+  s_425c6a8daa9f0b::t_0336806163313b 2-6,9-10,41,46-47
+  s_425c6a8daa9f0b::t_7d011bc253719c 273-286,321-349,357-362,379
+  s_425c6a8daa9f0b::t_ff96da22f3c252 114-115,124-125,145,147-148,150,154-155,169,172-205
+  s_c91e71fd808dfa::t_dd5a681cd5167a 122
+  s_5cd87d3d145e7f::t_f6c966066040af 21-26,28,30-32,35,45,48-59,98-99,123,130,146,149,151-153,156-158,162-168,170-171
+src/index.ts
+  s_425c6a8daa9f0b::t_c42bc33c60e81d 176,203
+  s_425c6a8daa9f0b::t_e12eb1514c00a6 3
+  s_425c6a8daa9f0b::t_221e0928645d9b 59,72,78,100,106,166
+  s_425c6a8daa9f0b::t_f2bf87e30a5d6c 65,93,163
+  s_425c6a8daa9f0b::t_f0b275981acfaf 41-45,49-51
+  s_425c6a8daa9f0b::t_44b2ccc8506737 47
+  s_425c6a8daa9f0b::t_22cf2b6e6fc697 4,40,46,48,52-55,61,79,109,175,240
+  s_425c6a8daa9f0b::t_45a1a1fe85f1cc 9-10
+  s_425c6a8daa9f0b::t_f883edb335eabd 241,249-252,258,260,263
+  s_425c6a8daa9f0b::t_0cd9a93e7c7f7b 253
+src/auth/token-storage.ts
+  s_425c6a8daa9f0b::t_086d70b1654a0b 48,69
+src/handlers/openai.ts
+  s_c91e71fd808dfa::t_311f9ab3b35edb 28,75-78,219-222,523-526,652-655
+  s_2e5055ceb5aa08::t_f295754e1ba27d 74,79-80,82,102,218,223-224,226,242,522,527-528,530,584,651,656-657,659,693,727
+  s_425c6a8daa9f0b::t_b566904c7d3c19 81,225,529,658
+tests/codex.test.ts
+  s_c91e71fd808dfa::t_1c738a24f13b4d 25,383,472-476,510-549,552-562
+  s_425c6a8daa9f0b::t_10c65f638c70d9 393-436,438-463,465-471
+  s_2e5055ceb5aa08::t_cea58a9237916d 346-382,384-392,563-597
+  s_c91e71fd808dfa::t_5f6486b19517d9 550-551
+  s_425c6a8daa9f0b::t_f3d71448bd764c 1277,1327
+  s_425c6a8daa9f0b::t_e6ea4604b6413a 150,161,437,464
+  s_425c6a8daa9f0b::t_9fbd9859a9f13e 477-509
+  s_5cd87d3d145e7f::t_f6c966066040af 959-962,974-975,1278-1281,1289-1290
+  s_425c6a8daa9f0b::t_7423dcbba4f6e5 1388
+src/auth/routing-extra.ts
+  s_425c6a8daa9f0b::t_2e12b70f04df4c 1-48,53-66
+  s_425c6a8daa9f0b::t_918647a29a0393 49-52
+src/auth/types.ts
+  s_425c6a8daa9f0b::t_679db679c5d1bd 22,37-43,54,61-76
+  s_425c6a8daa9f0b::t_48ea507284fe3e 18-21
+src/handlers/anthropic.ts
+  s_c91e71fd808dfa::t_311f9ab3b35edb 17,45-48,197-200,298-301
+  s_2e5055ceb5aa08::t_2b478446137210 44,49-50,52,74,196,201-202,204,243,297,302-303,305,322
+  s_425c6a8daa9f0b::t_cb7720bf235e37 304
+  s_425c6a8daa9f0b::t_15c7127e405de3 51,203
+src/providers/codex.ts
+  s_2e5055ceb5aa08::t_0fa42e9bb5f004 30
+tests/smoke.test.ts
+  s_425c6a8daa9f0b::t_1d316ff87987be 1237
+  s_425c6a8daa9f0b::t_3a5eb82030714a 107-111,116-151,166-170,175-210
+  s_425c6a8daa9f0b::t_21196743038aaf 29-43
+  s_5cd87d3d145e7f::t_1115ea0ac5a156 21-24,45-46,413-428,430-434,436-440,442-448,450-451
+  s_425c6a8daa9f0b::t_98f526cb0ad4d1 389
+  s_425c6a8daa9f0b::t_eee43a6db5993d 1170-1171
+  s_425c6a8daa9f0b::t_3b2e2793bf5f40 686
+  s_425c6a8daa9f0b::t_0efcc3f6d48038 114,173
+  s_425c6a8daa9f0b::t_dcfac2a1d35b74 1011,1058
+  s_425c6a8daa9f0b::t_33d61b9a7d7079 412,449,454,457-471,496,502,508
+  s_425c6a8daa9f0b::t_1887f741b5378c 400
+  s_425c6a8daa9f0b::t_c47ac1db49c546 484,490
+  s_425c6a8daa9f0b::t_6fd16772a2d303 15,112-113,115,152-155,171-172,174,211-214
+  s_425c6a8daa9f0b::t_04519e68335fd0 639
+  s_5cd87d3d145e7f::t_f6c966066040af 44,47,58-59
+  s_425c6a8daa9f0b::t_52d64d1ca90da4 429,435,441
+  s_c91e71fd808dfa::t_dd5a681cd5167a 455-456,472-483,485-489,491-495,497-501,503-507,509-517
+  s_425c6a8daa9f0b::t_7feb2a8f8cf253 552,619
+  s_425c6a8daa9f0b::t_7e22f53a87bcf9 1149,1151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "f061dc9e22c1274a93b0702d4c3824a7439bdc04",
+  "prompts": {},
+  "sessions": {
+    "s_2e5055ceb5aa08": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ecb46-9756-7e70-9e64-a4b6b379fd1a",
+        "model": "gpt-5.4"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    },
+    "s_425c6a8daa9f0b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ece1c-455d-7ee2-98a0-187fdd8a13ac",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    },
+    "s_5cd87d3d145e7f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ecb67-1f58-75b0-b0e5-78f42165a2d0",
+        "model": "gpt-5.4"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    },
+    "s_c91e71fd808dfa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ecb97-7bc1-7c51-a30b-5e92bff954c9",
+        "model": "gpt-5.4"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    }
+  }
+}
