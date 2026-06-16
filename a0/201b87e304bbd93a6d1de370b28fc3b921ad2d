@@ -1,0 +1,28 @@
+README_CN.md
+  s_425c6a8daa9f0b::t_10afb92238bcd5 336-357
+README.md
+  s_425c6a8daa9f0b::t_40863e7c24f9fa 337-358
+src/server.ts
+  s_425c6a8daa9f0b::t_3541eb8f8d5d3c 350-385
+src/auth/api-key-registry.ts
+  s_425c6a8daa9f0b::t_8c208a4c4d29e4 207-235,237-241,244-258
+  s_425c6a8daa9f0b::t_9e04d5fd85e83b 105,202,236,242-243
+tests/unit.test.ts
+  s_425c6a8daa9f0b::t_14eb4ad7fb0810 30,551-598
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "a0201b87e304bbd93a6d1de370b28fc3b921ad2d",
+  "prompts": {},
+  "sessions": {
+    "s_425c6a8daa9f0b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ece1c-455d-7ee2-98a0-187fdd8a13ac",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "王国浩 <guohao.wang@ly.com>"
+    }
+  }
+}
