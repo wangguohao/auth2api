@@ -17,7 +17,6 @@ import {
   inferResetPeriodMs,
   inferWindowType,
   RoutingPlan,
-  scoreCodexCandidate,
 } from "../routing/codex-smart-router";
 import { isAccountAllowedForTier } from "../routing/account-router";
 
@@ -810,9 +809,9 @@ export class AccountManager {
     }
 
     let best = candidates[0];
-    let bestScore = scoreCodexCandidate(best.acct, now);
+    let bestScore = this.scoreCodexAccount(best.acct, now);
     for (const candidate of candidates.slice(1)) {
-      const score = scoreCodexCandidate(candidate.acct, now);
+      const score = this.scoreCodexAccount(candidate.acct, now);
       if (score > bestScore + 1e-9) {
         best = candidate;
         bestScore = score;
@@ -1443,8 +1442,13 @@ export class AccountManager {
       ctx?.apiKeyTier,
     );
     const available = availability.available;
-    const resetUrgency = includeScore ? computeResetUrgency(acct.routing, now) : null;
-    const finalScore = includeScore ? scoreCodexCandidate(acct, now) : null;
+    const scoringRouting = includeScore
+      ? this.resolveScoringRoutingMetadata(acct, now)
+      : null;
+    const resetUrgency = includeScore
+      ? computeResetUrgency(scoringRouting, now)
+      : null;
+    const finalScore = includeScore ? this.scoreCodexAccount(acct, now) : null;
     return {
       email,
       selected: false,
@@ -1469,6 +1473,72 @@ export class AccountManager {
       },
       reasons: [],
     };
+  }
+
+  /**
+   * 为打分构造“可用的”重置元数据。
+   *
+   * 说明：
+   * - 运行中已有 `routing.resetAt` 时，直接沿用；
+   * - 没有 `routing.resetAt` 但已经刷新到 usage 时，优先使用主窗口的 `resetsAt`；
+   * - 这样 team / plus / pro 账号在首次进入决策时也能拿到非零的重置紧迫度。
+   */
+  private resolveScoringRoutingMetadata(
+    acct: AccountState,
+    now: number,
+  ): { resetAt: string | null; resetPeriodMs: number | null } {
+    const resetPeriodMs =
+      acct.routing.resetPeriodMs ?? inferResetPeriodMs(acct.token.planType);
+    const usageResetAt = this.resolveUsageResetAt(acct);
+    if (acct.routing.resetAt || !usageResetAt) {
+      return {
+        resetAt: acct.routing.resetAt,
+        resetPeriodMs,
+      };
+    }
+    if (resetPeriodMs) {
+      const usageResetAtMs = new Date(usageResetAt).getTime();
+      if (Number.isFinite(usageResetAtMs) && usageResetAtMs > now) {
+        return {
+          resetAt: usageResetAt,
+          resetPeriodMs,
+        };
+      }
+    }
+    return {
+      resetAt: acct.routing.resetAt,
+      resetPeriodMs,
+    };
+  }
+
+  /**
+   * 从 usage 快照中挑出最有代表性的重置时间，优先主窗口，其次任意
+   * 仍在未来的窗口。
+   */
+  private resolveUsageResetAt(acct: AccountState): string | null {
+    const now = Date.now();
+    const primaryBucket = acct.usage.buckets.find((bucket) => {
+      if (bucket.id !== "primary" || !bucket.resetsAt) return false;
+      const resetAtMs = new Date(bucket.resetsAt).getTime();
+      return Number.isFinite(resetAtMs) && resetAtMs > now;
+    });
+    if (primaryBucket?.resetsAt) {
+      return primaryBucket.resetsAt;
+    }
+    const futureBucket = acct.usage.buckets.find((bucket) => {
+      if (!bucket.resetsAt) return false;
+      const resetAtMs = new Date(bucket.resetsAt).getTime();
+      return Number.isFinite(resetAtMs) && resetAtMs > now;
+    });
+    return futureBucket?.resetsAt ?? null;
+  }
+
+  /** 统一 Codex 账号的实际选取与诊断打分，避免两个路径出现分歧。 */
+  private scoreCodexAccount(acct: AccountState, now: number): number {
+    const routing = this.resolveScoringRoutingMetadata(acct, now);
+    const resetUrgency = computeResetUrgency(routing, now);
+    const healthPenalty = Math.min(acct.failureCount * 0.15, 0.6);
+    return resetUrgency * 0.75 + acct.routingPlan.baseScore - healthPenalty;
   }
 
   private scheduleUsageRefresh(acct: AccountState, now: number): void {

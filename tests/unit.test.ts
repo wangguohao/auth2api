@@ -1890,6 +1890,70 @@ test("createServer exposes account decision diagnostics without mutating selecti
   }
 });
 
+test("codex smart routing uses team usage reset windows for scoring", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  try {
+    const manager = new AccountManager(tmp, {
+      provider: "codex",
+      refresh: async () => {
+        throw new Error("should not refresh");
+      },
+      routingMode: "codex-smart",
+    });
+
+    const now = Date.now();
+    manager.addAccount({
+      accessToken: "at-plus",
+      refreshToken: "rt-plus",
+      email: "plus@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct-plus",
+      provider: "codex",
+      planType: "plus",
+      routing: { bias: 0.08, level: "lite" },
+    });
+    manager.addAccount({
+      accessToken: "at-team",
+      refreshToken: "rt-team",
+      email: "team@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct-team",
+      provider: "codex",
+      planType: "team",
+      routing: { bias: 0.03, level: "lite" },
+      usage: {
+        status: "success",
+        source: "test",
+        buckets: [
+          {
+            id: "primary",
+            label: "Monthly limit",
+            window: "30d",
+            usedPercent: 25,
+            resetsAt: new Date(now + 15 * 24 * 60 * 60 * 1000).toISOString(),
+            valueLabel: null,
+            detail: null,
+          },
+        ],
+        lastRefreshAt: new Date(now).toISOString(),
+        lastWeeklyRefreshAt: null,
+        nextRefreshAt: null,
+        nextIdleRefreshAt: null,
+        lastError: null,
+      },
+    });
+
+    const inspection = manager.inspectNextAccount({ apiKeyTier: "lite" });
+    const team = inspection.accounts.find((item) => item.email === "team@example.com");
+    assert.equal(inspection.result.selectedAccountEmail, "team@example.com");
+    assert.ok(team);
+    assert.ok((team?.resetUrgency ?? 0) > 0);
+    assert.ok((team?.finalScore ?? 0) > 0.1);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("createServer account decision requires provider or model", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const apiKeys = makeApiKeyRegistry(tmp);
