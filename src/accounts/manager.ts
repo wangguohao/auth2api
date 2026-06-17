@@ -1445,7 +1445,7 @@ export class AccountManager {
     const scoringRouting = includeScore
       ? this.resolveScoringRoutingMetadata(acct, now)
       : null;
-    const resetUrgency = includeScore
+    const resetUrgency = scoringRouting
       ? computeResetUrgency(scoringRouting, now)
       : null;
     const finalScore = includeScore ? this.scoreCodexAccount(acct, now) : null;
