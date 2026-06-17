@@ -2440,6 +2440,50 @@ test("generateDailyReport renders chinese token usage", async () => {
         reasoningOutputTokens: 7,
       },
     };
+    // 趋势测试数据用于验证最近 8 天读取不会污染目标日期汇总。
+    const yesterdayEvent: TraceEvent = {
+      ...event,
+      ts: "2026-06-16T12:00:00.000Z",
+      traceId: "trace-yesterday",
+      status: "failure",
+      failureKind: "server",
+      statusCode: 500,
+      latencyMs: 2000,
+      cache: {
+        modelRoute: "miss",
+        sessionRoute: "none",
+        promptCacheReadTokens: 0,
+        promptCacheCreationTokens: 0,
+      },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        reasoningOutputTokens: 0,
+      },
+    };
+    const weekAgoEvent: TraceEvent = {
+      ...event,
+      ts: "2026-06-10T12:00:00.000Z",
+      traceId: "trace-week-ago",
+      latencyMs: 1000,
+      usage: {
+        inputTokens: 80,
+        outputTokens: 20,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 10,
+        reasoningOutputTokens: 0,
+      },
+    };
+    fs.writeFileSync(
+      recorder.traceFilePath("2026-06-10"),
+      `${JSON.stringify(weekAgoEvent)}\n`,
+    );
+    fs.writeFileSync(
+      recorder.traceFilePath("2026-06-16"),
+      `${JSON.stringify(yesterdayEvent)}\n`,
+    );
     fs.writeFileSync(
       recorder.traceFilePath(date),
       `${JSON.stringify(event)}\n`,
@@ -2478,11 +2522,19 @@ test("generateDailyReport renders chinese token usage", async () => {
     assert.match(result.html, /输入缓存命中 token/);
     assert.match(result.html, /缓存与路由/);
     assert.match(result.html, /服务商分布/);
+    assert.match(result.html, /最近 8 天趋势/);
+    assert.match(result.html, /2026-06-10/);
+    assert.match(result.html, /2026-06-17/);
+    assert.match(result.html, /环比昨日/);
+    assert.match(result.html, /周同比/);
     assert.doesNotMatch(result.html, /Cache Read Tokens/);
     assert.doesNotMatch(result.html, /Provider 分布/);
     assert.ok(sentBody);
     assert.match(sentBody.text, /服务商分布/);
     assert.match(sentBody.text, /输入 token: 100/);
+    assert.match(sentBody.text, /最近 8 天趋势/);
+    assert.match(sentBody.text, /环比昨日/);
+    assert.match(sentBody.text, /周同比/);
     assert.doesNotMatch(sentBody.text, /Provider 分布/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

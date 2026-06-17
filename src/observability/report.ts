@@ -89,6 +89,31 @@ export interface DailyReportSummaryView {
   }>;
 }
 
+interface TrendDayView {
+  date: string;
+  requests: string;
+  successRate: string;
+  p95Latency: string;
+  totalTokens: string;
+  cacheHitRate: string;
+  failures: string;
+}
+
+interface TrendComparisonView {
+  requests: string;
+  successRate: string;
+  p95Latency: string;
+  totalTokens: string;
+  cacheHitRate: string;
+}
+
+interface ReportView {
+  current: DailyReportSummaryView;
+  trend: TrendDayView[];
+  dayOverDay: TrendComparisonView;
+  weekOverWeek: TrendComparisonView;
+}
+
 function emptySummary(date: string): DailySummary {
   return {
     date,
@@ -160,6 +185,103 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
+// 计算单日总 token，统一用于当日报告和 8 天趋势。
+function totalTokens(summary: DailySummary): number {
+  return (
+    summary.inputTokens + summary.outputTokens + summary.reasoningOutputTokens
+  );
+}
+
+// 计算模型路由缓存命中率，趋势表用它观察缓存收益变化。
+function modelRouteHitRate(summary: DailySummary): number {
+  const total = summary.modelRouteHits + summary.modelRouteMisses;
+  return total === 0 ? 0 : (summary.modelRouteHits / total) * 100;
+}
+
+// 用 YYYY-MM-DD 做 UTC 日期加减，避免本地时区夏令时影响日期窗口。
+function shiftDateKey(date: string, days: number): string {
+  const [year, month, day] = date.split("-").map((part) => Number(part));
+  const value = new Date(Date.UTC(year, month - 1, day + days));
+  return value.toISOString().slice(0, 10);
+}
+
+// 构建包含目标日期在内的最近 8 天日期列表，顺序从旧到新。
+function recentDateKeys(date: string, days: number): string[] {
+  return Array.from({ length: days }, (_, idx) =>
+    shiftDateKey(date, idx - days + 1),
+  );
+}
+
+// 格式化趋势对比差值，正负号保留，方便邮件里直接判断升降。
+function formatDelta(current: number, previous: number, unit = ""): string {
+  const delta = current - previous;
+  const sign = delta > 0 ? "+" : "";
+  if (unit === "ms") return `${sign}${formatMs(Math.round(delta))}`;
+  if (unit === "%") return `${sign}${formatPercent(delta)}`;
+  return `${sign}${formatNumber(delta)}`;
+}
+
+// 将目标日和对比日转换成环比/周同比展示项。
+function buildComparisonView(
+  current: DailySummary,
+  previous: DailySummary | undefined,
+): TrendComparisonView {
+  if (!previous) {
+    return {
+      requests: "无对比数据",
+      successRate: "无对比数据",
+      p95Latency: "无对比数据",
+      totalTokens: "无对比数据",
+      cacheHitRate: "无对比数据",
+    };
+  }
+  const currentSuccessRate =
+    current.requests === 0 ? 0 : (current.successes / current.requests) * 100;
+  const previousSuccessRate =
+    previous.requests === 0
+      ? 0
+      : (previous.successes / previous.requests) * 100;
+  return {
+    requests: formatDelta(current.requests, previous.requests),
+    successRate: formatDelta(currentSuccessRate, previousSuccessRate, "%"),
+    p95Latency: formatDelta(
+      percentile(current.latencies, 95),
+      percentile(previous.latencies, 95),
+      "ms",
+    ),
+    totalTokens: formatDelta(totalTokens(current), totalTokens(previous)),
+    cacheHitRate: formatDelta(
+      modelRouteHitRate(current),
+      modelRouteHitRate(previous),
+      "%",
+    ),
+  };
+}
+
+// 构建日报完整视图：当前日详情、最近 8 天趋势、环比和周同比。
+function buildReportView(summaries: DailySummary[]): ReportView {
+  const current = summaries[summaries.length - 1];
+  const previous = summaries[summaries.length - 2];
+  const weekAgo = summaries[0];
+  return {
+    current: buildSummaryView(current),
+    trend: summaries.map((summary) => ({
+      date: summary.date,
+      requests: formatNumber(summary.requests),
+      successRate:
+        summary.requests === 0
+          ? "0%"
+          : formatPercent((summary.successes / summary.requests) * 100),
+      p95Latency: formatMs(percentile(summary.latencies, 95)),
+      totalTokens: formatNumber(totalTokens(summary)),
+      cacheHitRate: formatPercent(modelRouteHitRate(summary)),
+      failures: formatNumber(summary.failures),
+    })),
+    dayOverDay: buildComparisonView(current, previous),
+    weekOverWeek: buildComparisonView(current, weekAgo),
+  };
+}
+
 function buildSummaryView(summary: DailySummary): DailyReportSummaryView {
   const successRate =
     summary.requests === 0 ? 0 : (summary.successes / summary.requests) * 100;
@@ -208,11 +330,7 @@ function buildSummaryView(summary: DailySummary): DailyReportSummaryView {
       promptCacheCreationTokens: formatNumber(
         summary.promptCacheCreationTokens,
       ),
-      totalTokens: formatNumber(
-        summary.inputTokens +
-          summary.outputTokens +
-          summary.reasoningOutputTokens,
-      ),
+      totalTokens: formatNumber(totalTokens(summary)),
     },
     slowRequests: summary.slowRequests.map((r) => ({
       traceId: r.traceId,
@@ -257,18 +375,26 @@ function applyEvent(summary: DailySummary, event: TraceEvent): void {
   if (summary.slowRequests.length > 20) summary.slowRequests.length = 20;
 }
 
-function renderMarkdown(summary: DailySummary): string {
-  const view = buildSummaryView(summary);
+function renderMarkdown(summaries: DailySummary[]): string {
+  const summary = summaries[summaries.length - 1];
+  const view = buildReportView(summaries);
+  const current = view.current;
 
   const slow =
-    view.slowRequests.length === 0
+    current.slowRequests.length === 0
       ? "- 无\n"
-      : view.slowRequests
+      : current.slowRequests
           .map(
             (r) =>
               `- ${r.traceId} ${r.latency} ${r.statusCode} ${r.provider} ${r.model} ${r.endpoint}${r.failureKind ? ` (${r.failureKind})` : ""}`,
           )
           .join("\n") + "\n";
+  const trend = view.trend
+    .map(
+      (item) =>
+        `- ${item.date}: 请求 ${item.requests}, 成功率 ${item.successRate}, P95 ${item.p95Latency}, 总 token ${item.totalTokens}, 模型路由缓存命中率 ${item.cacheHitRate}, 失败 ${item.failures}`,
+    )
+    .join("\n");
 
   return `# auth2api 日报 ${summary.date}
 
@@ -277,13 +403,22 @@ function renderMarkdown(summary: DailySummary): string {
 - 请求数: ${summary.requests}
 - 成功: ${summary.successes}
 - 失败: ${summary.failures}
-- 成功率: ${view.successRate}
+- 成功率: ${current.successRate}
+
+## 最近 8 天趋势
+
+${trend}
+
+## 对比变化
+
+- 环比昨日: 请求 ${view.dayOverDay.requests}, 成功率 ${view.dayOverDay.successRate}, P95 ${view.dayOverDay.p95Latency}, 总 token ${view.dayOverDay.totalTokens}, 模型路由缓存命中率 ${view.dayOverDay.cacheHitRate}
+- 周同比: 请求 ${view.weekOverWeek.requests}, 成功率 ${view.weekOverWeek.successRate}, P95 ${view.weekOverWeek.p95Latency}, 总 token ${view.weekOverWeek.totalTokens}, 模型路由缓存命中率 ${view.weekOverWeek.cacheHitRate}
 
 ## 延迟
 
-- P50: ${view.latency.p50}
-- P95: ${view.latency.p95}
-- P99: ${view.latency.p99}
+- P50: ${current.latency.p50}
+- P95: ${current.latency.p95}
+- P99: ${current.latency.p99}
 
 ## 服务商分布
 
@@ -296,25 +431,27 @@ ${topEntries(summary.byEndpoint)}
 ${topEntries(summary.failureKinds)}
 ## Token 用量
 
-- 输入 token: ${view.tokens.inputTokens}
-- 输出 token: ${view.tokens.outputTokens}
-- 推理输出 token: ${view.tokens.reasoningOutputTokens}
-- 输入缓存命中 token: ${view.tokens.promptCacheReadTokens}
-- 输入缓存写入 token: ${view.tokens.promptCacheCreationTokens}
-- 总 token: ${view.tokens.totalTokens}
+- 输入 token: ${current.tokens.inputTokens}
+- 输出 token: ${current.tokens.outputTokens}
+- 推理输出 token: ${current.tokens.reasoningOutputTokens}
+- 输入缓存命中 token: ${current.tokens.promptCacheReadTokens}
+- 输入缓存写入 token: ${current.tokens.promptCacheCreationTokens}
+- 总 token: ${current.tokens.totalTokens}
 
 ## 缓存与路由
 
-- 模型路由缓存命中/未命中: ${summary.modelRouteHits}/${summary.modelRouteMisses} (${view.cache.modelRouteHitRate})
-- 会话路由缓存命中/未命中: ${summary.sessionRouteHits}/${summary.sessionRouteMisses} (${view.cache.sessionRouteHitRate})
+- 模型路由缓存命中/未命中: ${summary.modelRouteHits}/${summary.modelRouteMisses} (${current.cache.modelRouteHitRate})
+- 会话路由缓存命中/未命中: ${summary.sessionRouteHits}/${summary.sessionRouteMisses} (${current.cache.sessionRouteHitRate})
 
 ## 慢请求 Top 20
 
 ${slow}`;
 }
 
-function renderHtml(summary: DailySummary): string {
-  const view = buildSummaryView(summary);
+function renderHtml(summaries: DailySummary[]): string {
+  const summary = summaries[summaries.length - 1];
+  const view = buildReportView(summaries);
+  const current = view.current;
   const listSection = (
     title: string,
     entries: Array<{ key: string; count: number }>,
@@ -335,9 +472,9 @@ function renderHtml(summary: DailySummary): string {
     </section>
   `;
   const slowRows =
-    view.slowRequests.length === 0
+    current.slowRequests.length === 0
       ? `<tr><td colspan="6" class="empty-cell">无</td></tr>`
-      : view.slowRequests
+      : current.slowRequests
           .map(
             (item) => `<tr>
               <td class="mono">${escapeHtml(item.traceId)}</td>
@@ -349,6 +486,19 @@ function renderHtml(summary: DailySummary): string {
             </tr>`,
           )
           .join("");
+  const trendRows = view.trend
+    .map(
+      (item) => `<tr>
+        <td>${item.date}</td>
+        <td>${item.requests}</td>
+        <td>${item.successRate}</td>
+        <td>${item.p95Latency}</td>
+        <td>${item.totalTokens}</td>
+        <td>${item.cacheHitRate}</td>
+        <td>${item.failures}</td>
+      </tr>`,
+    )
+    .join("");
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -398,46 +548,80 @@ function renderHtml(summary: DailySummary): string {
     <div class="sub">${summary.date}</div>
 
     <div class="grid">
-      <div class="card"><div class="label">请求数</div><div class="value">${formatNumber(view.requests)}</div></div>
-      <div class="card"><div class="label">成功率</div><div class="value">${view.successRate}</div></div>
-      <div class="card"><div class="label">P95 延迟</div><div class="value">${view.latency.p95}</div></div>
-      <div class="card"><div class="label">总 Token</div><div class="value">${view.tokens.totalTokens}</div></div>
+      <div class="card"><div class="label">请求数</div><div class="value">${formatNumber(current.requests)}</div></div>
+      <div class="card"><div class="label">成功率</div><div class="value">${current.successRate}</div></div>
+      <div class="card"><div class="label">P95 延迟</div><div class="value">${current.latency.p95}</div></div>
+      <div class="card"><div class="label">总 Token</div><div class="value">${current.tokens.totalTokens}</div></div>
     </div>
+
+    <section class="panel">
+      <h2>最近 8 天趋势</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>请求数</th>
+            <th>成功率</th>
+            <th>P95 延迟</th>
+            <th>总 Token</th>
+            <th>模型路由缓存命中率</th>
+            <th>失败数</th>
+          </tr>
+        </thead>
+        <tbody>${trendRows}</tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>对比变化</h2>
+      <div class="kv">
+        <div class="kv-item"><div class="kv-label">环比昨日请求数</div><div class="kv-value">${view.dayOverDay.requests}</div></div>
+        <div class="kv-item"><div class="kv-label">周同比请求数</div><div class="kv-value">${view.weekOverWeek.requests}</div></div>
+        <div class="kv-item"><div class="kv-label">环比昨日成功率</div><div class="kv-value">${view.dayOverDay.successRate}</div></div>
+        <div class="kv-item"><div class="kv-label">周同比成功率</div><div class="kv-value">${view.weekOverWeek.successRate}</div></div>
+        <div class="kv-item"><div class="kv-label">环比昨日 P95</div><div class="kv-value">${view.dayOverDay.p95Latency}</div></div>
+        <div class="kv-item"><div class="kv-label">周同比 P95</div><div class="kv-value">${view.weekOverWeek.p95Latency}</div></div>
+        <div class="kv-item"><div class="kv-label">环比昨日总 Token</div><div class="kv-value">${view.dayOverDay.totalTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">周同比总 Token</div><div class="kv-value">${view.weekOverWeek.totalTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">环比昨日缓存命中率</div><div class="kv-value">${view.dayOverDay.cacheHitRate}</div></div>
+        <div class="kv-item"><div class="kv-label">周同比缓存命中率</div><div class="kv-value">${view.weekOverWeek.cacheHitRate}</div></div>
+      </div>
+    </section>
 
     <section class="panel">
       <h2>总览</h2>
       <div class="kv">
-        <div class="kv-item"><div class="kv-label">成功</div><div class="kv-value">${formatNumber(view.successes)}</div></div>
-        <div class="kv-item"><div class="kv-label">失败</div><div class="kv-value">${formatNumber(view.failures)}</div></div>
-        <div class="kv-item"><div class="kv-label">P50</div><div class="kv-value">${view.latency.p50}</div></div>
-        <div class="kv-item"><div class="kv-label">P99</div><div class="kv-value">${view.latency.p99}</div></div>
+        <div class="kv-item"><div class="kv-label">成功</div><div class="kv-value">${formatNumber(current.successes)}</div></div>
+        <div class="kv-item"><div class="kv-label">失败</div><div class="kv-value">${formatNumber(current.failures)}</div></div>
+        <div class="kv-item"><div class="kv-label">P50</div><div class="kv-value">${current.latency.p50}</div></div>
+        <div class="kv-item"><div class="kv-label">P99</div><div class="kv-value">${current.latency.p99}</div></div>
       </div>
     </section>
 
     <div class="two-col">
-      ${listSection("服务商分布", view.providerDistribution)}
-      ${listSection("接口分布", view.endpointDistribution)}
+      ${listSection("服务商分布", current.providerDistribution)}
+      ${listSection("接口分布", current.endpointDistribution)}
     </div>
 
     <section class="panel">
       <h2>Token 用量</h2>
       <div class="kv">
-        <div class="kv-item"><div class="kv-label">输入 token</div><div class="kv-value">${view.tokens.inputTokens}</div></div>
-        <div class="kv-item"><div class="kv-label">输出 token</div><div class="kv-value">${view.tokens.outputTokens}</div></div>
-        <div class="kv-item"><div class="kv-label">推理输出 token</div><div class="kv-value">${view.tokens.reasoningOutputTokens}</div></div>
-        <div class="kv-item"><div class="kv-label">总 token</div><div class="kv-value">${view.tokens.totalTokens}</div></div>
-        <div class="kv-item"><div class="kv-label">输入缓存命中 token</div><div class="kv-value">${view.tokens.promptCacheReadTokens}</div></div>
-        <div class="kv-item"><div class="kv-label">输入缓存写入 token</div><div class="kv-value">${view.tokens.promptCacheCreationTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输入 token</div><div class="kv-value">${current.tokens.inputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输出 token</div><div class="kv-value">${current.tokens.outputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">推理输出 token</div><div class="kv-value">${current.tokens.reasoningOutputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">总 token</div><div class="kv-value">${current.tokens.totalTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输入缓存命中 token</div><div class="kv-value">${current.tokens.promptCacheReadTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输入缓存写入 token</div><div class="kv-value">${current.tokens.promptCacheCreationTokens}</div></div>
       </div>
     </section>
 
     <div class="two-col">
-      ${listSection("失败类型", view.failureKinds)}
+      ${listSection("失败类型", current.failureKinds)}
       <section class="panel">
         <h2>缓存与路由</h2>
         <div class="kv">
-          <div class="kv-item"><div class="kv-label">模型路由缓存</div><div class="kv-value">${view.cache.modelRouteHits}/${view.cache.modelRouteMisses} (${view.cache.modelRouteHitRate})</div></div>
-          <div class="kv-item"><div class="kv-label">会话路由缓存</div><div class="kv-value">${view.cache.sessionRouteHits}/${view.cache.sessionRouteMisses} (${view.cache.sessionRouteHitRate})</div></div>
+          <div class="kv-item"><div class="kv-label">模型路由缓存</div><div class="kv-value">${current.cache.modelRouteHits}/${current.cache.modelRouteMisses} (${current.cache.modelRouteHitRate})</div></div>
+          <div class="kv-item"><div class="kv-label">会话路由缓存</div><div class="kv-value">${current.cache.sessionRouteHits}/${current.cache.sessionRouteMisses} (${current.cache.sessionRouteHitRate})</div></div>
         </div>
       </section>
     </div>
@@ -510,9 +694,14 @@ export async function generateDailyReport(
     throw new Error("date must be YYYY-MM-DD");
   }
 
-  const summary = await readDailySummary(recorder, options.date);
+  const summaries = await Promise.all(
+    recentDateKeys(options.date, 8).map((date) =>
+      readDailySummary(recorder, date),
+    ),
+  );
+  const summary = summaries[summaries.length - 1];
   const summaryView = buildSummaryView(summary);
-  const html = renderHtml(summary);
+  const html = renderHtml(summaries);
   const htmlFilePath = recorder.reportHtmlFilePath(options.date);
   fs.mkdirSync(path.dirname(htmlFilePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(htmlFilePath, html, { mode: 0o600 });
@@ -521,7 +710,7 @@ export async function generateDailyReport(
   const recipients = config.observability.report.recipients;
   if (options.sendEmail && recipients.length > 0) {
     if (!sendMail) throw new Error("mail sender is not configured");
-    const markdown = renderMarkdown(summary);
+    const markdown = renderMarkdown(summaries);
     await sendMail(
       `auth2api 日报 ${options.date}`,
       { text: markdown, html },

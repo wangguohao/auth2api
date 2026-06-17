@@ -4,6 +4,7 @@ import {
   RoutingConfig,
   RoutingLevel,
   TokenData,
+  TokenUsageSnapshot,
 } from "../auth/types";
 import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
@@ -164,6 +165,14 @@ interface RoutingMetadata {
   confidence: MetadataConfidence;
   windowType: string | null;
   resetPeriodMs: number | null;
+}
+
+/** 账号当前可用性快照，统一封装 cooldown 与 quota 用尽两类不可用原因。 */
+interface AccountAvailabilityState {
+  available: boolean;
+  unavailableUntil: number;
+  failureKind: AccountFailureKind | null;
+  reason: "cooldown" | "usage_exhausted" | null;
 }
 
 /**
@@ -344,6 +353,16 @@ function emptyUsageSnapshot(): AccountUsageSnapshot {
     nextRefreshAt: null,
     nextIdleRefreshAt: null,
     lastError: null,
+  };
+}
+
+/** 克隆用量快照，避免内存对象与持久化 token 共享引用。 */
+function cloneUsageSnapshot(
+  usage: TokenUsageSnapshot | AccountUsageSnapshot,
+): AccountUsageSnapshot {
+  return {
+    ...usage,
+    buckets: (usage.buckets || []).map((bucket) => ({ ...bucket })),
   };
 }
 
@@ -538,7 +557,8 @@ export class AccountManager {
     if (count === 1 && !ctx?.apiKeyTier) {
       const email = this.accountOrder[0];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      const availability = this.getAccountAvailability(acct, now);
+      if (availability.available) {
         this.lastUsedIndex = 0;
         this.stickyUntil = now + randomStickyDuration();
         return {
@@ -564,8 +584,9 @@ export class AccountManager {
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
+      const availability = this.getAccountAvailability(acct, now);
       if (
-        acct.cooldownUntil <= now &&
+        availability.available &&
         this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
       ) {
         return {
@@ -592,8 +613,9 @@ export class AccountManager {
       const idx = (startIdx + i) % count;
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
+      const availability = this.getAccountAvailability(acct, now);
       if (
-        acct.cooldownUntil <= now &&
+        availability.available &&
         this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
       ) {
         this.lastUsedIndex = idx;
@@ -649,12 +671,21 @@ export class AccountManager {
     now: number,
   ): AccountResult {
     const firstAcct = this.accounts.get(emails[0])!;
-    let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
-    let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
+    const firstAvailability = this.getAccountAvailability(firstAcct, now);
+    let bestKind: AccountFailureKind =
+      firstAvailability.failureKind ??
+      firstAcct.lastFailureKind ??
+      "network";
+    let bestRemainingMs = Math.max(
+      0,
+      firstAvailability.unavailableUntil - now,
+    );
     for (const email of emails.slice(1)) {
       const acct = this.accounts.get(email)!;
-      const kind = acct.lastFailureKind ?? "network";
-      const remainingMs = Math.max(0, acct.cooldownUntil - now);
+      const availability = this.getAccountAvailability(acct, now);
+      const kind =
+        availability.failureKind ?? acct.lastFailureKind ?? "network";
+      const remainingMs = Math.max(0, availability.unavailableUntil - now);
       if (
         FAILURE_PRIORITY[kind] < FAILURE_PRIORITY[bestKind] ||
         (FAILURE_PRIORITY[kind] === FAILURE_PRIORITY[bestKind] &&
@@ -727,9 +758,13 @@ export class AccountManager {
     const candidates = this.accountOrder
       .map((email, idx) => ({ email, idx, acct: this.accounts.get(email)! }))
       .filter(
-        ({ acct }) =>
-          acct.cooldownUntil <= now &&
-          this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier),
+        ({ acct }) => {
+          const availability = this.getAccountAvailability(acct, now);
+          return (
+            availability.available &&
+            this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
+          );
+        },
       );
     if (candidates.length === 0) {
       const tierEligible = this.accountOrder.filter((email) => {
@@ -899,7 +934,7 @@ export class AccountManager {
     for (const acct of this.accounts.values()) {
       snapshots.push({
         email: acct.token.email,
-        available: acct.cooldownUntil <= now,
+        available: this.getAccountAvailability(acct, now).available,
         cooldownUntil: acct.cooldownUntil,
         failureCount: acct.failureCount,
         lastError: acct.lastError,
@@ -994,7 +1029,7 @@ export class AccountManager {
       `\n===== [${this.provider}] account stats (${new Date().toISOString()}) =====`,
     );
     for (const acct of this.accounts.values()) {
-      const available = acct.cooldownUntil <= Date.now();
+      const available = this.getAccountAvailability(acct, Date.now()).available;
       console.log(
         `  ${acct.token.email}: ` +
           `available=${available}, ` +
@@ -1101,7 +1136,7 @@ export class AccountManager {
         };
         return base;
       }
-      only.reasons.push("rejected:cooldown_active");
+      only.reasons.push(this.buildUnavailableReason(only.email, now));
       return this.attachCooldownResult(base, accounts, now, "default", "none");
     }
 
@@ -1129,7 +1164,9 @@ export class AccountManager {
         return base;
       }
       sticky.reasons.push(
-        sticky.available ? "rejected:tier_not_allowed" : "rejected:cooldown_active",
+        sticky.available
+          ? "rejected:tier_not_allowed"
+          : this.buildUnavailableReason(sticky.email, now),
       );
     }
 
@@ -1371,7 +1408,7 @@ export class AccountManager {
       if (!account.allowedForTier) {
         account.reasons.push("rejected:tier_not_allowed");
       } else if (!account.available) {
-        account.reasons.push("rejected:cooldown_active");
+        account.reasons.push(this.buildUnavailableReason(account.email, now));
       }
     }
     return inspection;
@@ -1384,11 +1421,12 @@ export class AccountManager {
     includeScore: boolean,
   ): AccountDecisionCandidateDiagnostic {
     const acct = this.accounts.get(email)!;
+    const availability = this.getAccountAvailability(acct, now);
     const allowedForTier = this.isAccountAllowedForTier(
       acct.routingPlan.level,
       ctx?.apiKeyTier,
     );
-    const available = acct.cooldownUntil <= now;
+    const available = availability.available;
     const resetUrgency = includeScore ? computeResetUrgency(acct.routing, now) : null;
     const finalScore = includeScore ? scoreCodexCandidate(acct, now) : null;
     return {
@@ -1397,7 +1435,9 @@ export class AccountManager {
       available,
       allowedForTier,
       cooldownUntil:
-        acct.cooldownUntil > now ? new Date(acct.cooldownUntil).toISOString() : null,
+        availability.unavailableUntil > now
+          ? new Date(availability.unavailableUntil).toISOString()
+          : null,
       lastFailureKind: acct.lastFailureKind,
       lastError: acct.lastError,
       routingLevel: acct.routingPlan.level,
@@ -1473,6 +1513,7 @@ export class AccountManager {
           nextIdleRefreshAt: null,
           lastError: null,
         };
+        this.persistAccountUsage(acct);
       } catch (err: any) {
         acct.usage = {
           ...acct.usage,
@@ -1480,6 +1521,7 @@ export class AccountManager {
           lastError: err?.message || String(err),
           lastRefreshAt: refreshedAt,
         };
+        this.persistAccountUsage(acct);
       } finally {
         const now = Date.now();
         acct.usageRefreshPromise = null;
@@ -1497,6 +1539,12 @@ export class AccountManager {
     })();
     acct.usageRefreshPromise = run;
     return run;
+  }
+
+  /** 将最新用量快照写回 token JSON，保证重启后仍能参与路由。 */
+  private persistAccountUsage(acct: AccountState): void {
+    acct.token.usage = cloneUsageSnapshot(acct.usage);
+    saveToken(this.authDir, acct.token);
   }
 
   private async refreshAll(): Promise<void> {
@@ -1597,7 +1645,7 @@ export class AccountManager {
       totalCacheReadInputTokens: 0,
       totalReasoningOutputTokens: 0,
       refreshPromise: null,
-      usage: emptyUsageSnapshot(),
+      usage: token.usage ? cloneUsageSnapshot(token.usage) : emptyUsageSnapshot(),
       usageRefreshPromise: null,
       usageActiveRefreshAt: null,
       usageIdleRefreshAt: null,
@@ -1614,8 +1662,71 @@ export class AccountManager {
     };
   }
 
+  /** 解析限流桶是否已耗尽，任意桶耗尽都视为不可用，直到所有已耗尽桶都恢复。 */
+  private getUsageExhaustedUntil(acct: AccountState, now: number): number | null {
+    let exhaustedUntil: number | null = null;
+    for (const bucket of acct.usage.buckets) {
+      if (bucket.usedPercent === null || bucket.usedPercent < 100) continue;
+      if (!bucket.resetsAt) continue;
+      const resetsAtMs = new Date(bucket.resetsAt).getTime();
+      if (!Number.isFinite(resetsAtMs) || resetsAtMs <= now) continue;
+      exhaustedUntil =
+        exhaustedUntil === null
+          ? resetsAtMs
+          : Math.max(exhaustedUntil, resetsAtMs);
+    }
+    return exhaustedUntil;
+  }
+
+  /**
+   * 统一账号可用性判断。
+   * 复杂逻辑说明：
+   * 1. cooldown 优先，保留既有失败退避行为；
+   * 2. 当任意限流桶已达 100% 且 resetsAt 仍在未来时，直接视为不可用；
+   * 3. 管理接口与真实路由共用这一判断，避免展示和选路不一致。
+   */
+  private getAccountAvailability(
+    acct: AccountState,
+    now: number,
+  ): AccountAvailabilityState {
+    if (acct.cooldownUntil > now) {
+      return {
+        available: false,
+        unavailableUntil: acct.cooldownUntil,
+        failureKind: acct.lastFailureKind ?? "network",
+        reason: "cooldown",
+      };
+    }
+
+    const usageExhaustedUntil = this.getUsageExhaustedUntil(acct, now);
+    if (usageExhaustedUntil !== null) {
+      return {
+        available: false,
+        unavailableUntil: usageExhaustedUntil,
+        failureKind: "rate_limit",
+        reason: "usage_exhausted",
+      };
+    }
+
+    return {
+      available: true,
+      unavailableUntil: 0,
+      failureKind: null,
+      reason: null,
+    };
+  }
+
+  /** 为管理接口生成更精确的不可用原因，避免将 quota 用尽误报为 cooldown。 */
+  private buildUnavailableReason(email: string, now: number): string {
+    const acct = this.accounts.get(email)!;
+    const availability = this.getAccountAvailability(acct, now);
+    return availability.reason === "usage_exhausted"
+      ? "rejected:usage_exhausted"
+      : "rejected:cooldown_active";
+  }
+
   private isStickyReusable(acct: AccountState, now: number): boolean {
-    if (acct.cooldownUntil > now) return false;
+    if (!this.getAccountAvailability(acct, now).available) return false;
     if (acct.lastFailureKind === "auth" || acct.lastFailureKind === "forbidden")
       return false;
     return true;

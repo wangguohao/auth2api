@@ -22,6 +22,8 @@ export interface TokenData {
   routing?: RoutingConfig;
   /** Codex only — raw chatgpt_plan_type claim from id_token (free/plus/pro/…). */
   planType?: string;
+  /** 持久化的账号用量快照，供重启后继续参与路由。 */
+  usage?: TokenUsageSnapshot;
   /** Cursor only — stable machine id read from Cursor's local storage. */
   cursorServiceMachineId?: string;
   /** Cursor only — client version accepted by Cursor's internal API. */
@@ -41,6 +43,29 @@ export interface RoutingConfig {
   level?: RoutingLevel;
 }
 
+/** 持久化到 token JSON 的单个用量窗口快照。 */
+export interface TokenUsageBucket {
+  id: string;
+  label: string;
+  window: string | null;
+  usedPercent: number | null;
+  resetsAt: string | null;
+  valueLabel: string | null;
+  detail: string | null;
+}
+
+/** 持久化到 token JSON 的账号用量快照。 */
+export interface TokenUsageSnapshot {
+  status: "never" | "success" | "failure";
+  source: string | null;
+  buckets: TokenUsageBucket[];
+  lastRefreshAt: string | null;
+  lastWeeklyRefreshAt: string | null;
+  nextRefreshAt: string | null;
+  nextIdleRefreshAt: string | null;
+  lastError: string | null;
+}
+
 export interface TokenStorage {
   access_token: string;
   refresh_token: string;
@@ -52,6 +77,7 @@ export interface TokenStorage {
   id_token?: string;
   plan_type?: string;
   routing?: RoutingConfig;
+  usage?: TokenUsageSnapshot;
   cursor_service_machine_id?: string;
   cursor_client_version?: string;
   cursor_config_version?: string;

@@ -314,6 +314,18 @@ export async function proxyWithRetry(
       ) {
         // Account-level failures: cooldown, may retry on another account.
         manager.recordFailure(account.token.email, classifyFailure(lastStatus));
+        if (lastStatus === 429) {
+          try {
+            // 429 后主动刷新一次账号用量，尽快识别 primary quota 已耗尽的账号。
+            await manager.refreshUsage(account.token.email);
+          } catch (err: any) {
+            if (isDebugLevel(config.debug, "errors")) {
+              console.error(
+                `${tag} usage refresh after 429 failed: ${err?.message || String(err)}`,
+              );
+            }
+          }
+        }
       }
       // Other 4xx (400, 404, 422, …) are client request errors — the account is
       // healthy, the request body is bad. Do NOT cool down the account, and do
