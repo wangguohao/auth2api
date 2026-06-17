@@ -1,0 +1,19 @@
+src/accounts/manager.ts
+  s_7ccfc80f64e602::t_0a50d4260fcf46 1448
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "62263bf024121c0574d5ab69f96c4a6061e90879",
+  "prompts": {},
+  "sessions": {
+    "s_7ccfc80f64e602": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed5b9-6322-7131-8273-696ea515666d",
+        "model": "gpt-5.4"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
