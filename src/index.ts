@@ -6,7 +6,7 @@ import { generatePKCECodes } from "./auth/pkce";
 import { waitForCallback } from "./auth/callback-server";
 import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
 import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
-import { ApiKeyRegistry } from "./auth/api-key-registry";
+import { ApiKeyStore } from "./registry/api-key-store";
 import { applyRoutingExtra, parseRoutingExtraArg } from "./auth/routing-extra";
 import { buildRegistry, ProviderRegistry } from "./providers/registry";
 import { getRouteLines } from "./routes";
@@ -44,13 +44,13 @@ function parseProviderArg(args: string[]): ProviderId {
   );
 }
 
-function buildApiKeyRegistry(config: Config, authDir: string): ApiKeyRegistry {
+function buildApiKeyRegistry(config: Config, authDir: string): ApiKeyStore {
   const tierLimits = config["api-key-tier-limits"] ?? {
     lite: { concurrency: 5, "max-requests-5h": 300 },
     pro: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
     admin: { concurrencyMultiplier: 2, "max-requests-multiplier": 2 },
   };
-  return new ApiKeyRegistry(authDir, {
+  return new ApiKeyStore(authDir, {
     bootstrapAdminKey: config["bootstrap-admin-key"],
     tierLimits: {
       lite: resolveTierLimit(tierLimits, "lite"),
@@ -63,7 +63,7 @@ function buildApiKeyRegistry(config: Config, authDir: string): ApiKeyRegistry {
 async function importCursorLogin(
   config: Config,
   registry: ProviderRegistry,
-  apiKeys: ApiKeyRegistry,
+  apiKeys: ApiKeyStore,
   storagePath?: string,
   extra?: RoutingConfig,
 ): Promise<void> {
@@ -82,7 +82,7 @@ async function importCursorLogin(
 async function browserCursorLogin(
   config: Config,
   registry: ProviderRegistry,
-  apiKeys: ApiKeyRegistry,
+  apiKeys: ApiKeyStore,
   extra?: RoutingConfig,
 ): Promise<void> {
   const provider = registry.get("cursor");
@@ -110,7 +110,7 @@ async function browserCursorLogin(
 async function doLogin(
   config: Config,
   registry: ProviderRegistry,
-  apiKeys: ApiKeyRegistry,
+  apiKeys: ApiKeyStore,
   providerId: ProviderId,
   manual: boolean,
   extra?: RoutingConfig,

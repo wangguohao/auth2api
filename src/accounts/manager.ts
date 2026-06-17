@@ -8,6 +8,16 @@ import {
 import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
+import { StickySessionCache } from "../cache/sticky-session-cache";
+import {
+  buildRoutingPlan,
+  computeResetUrgency,
+  inferResetPeriodMs,
+  inferWindowType,
+  RoutingPlan,
+  scoreCodexCandidate,
+} from "../routing/codex-smart-router";
+import { isAccountAllowedForTier } from "../routing/account-router";
 
 // Reauth-required cooldown: long enough that the account doesn't keep
 // hitting the upstream, but bounded so a re-login auto-recovers next sweep.
@@ -156,18 +166,6 @@ interface RoutingMetadata {
   resetPeriodMs: number | null;
 }
 
-interface SessionBinding {
-  email: string;
-  expiresAt: number;
-  lastSeenAt: string;
-  model: string | null;
-}
-
-interface RoutingPlan {
-  level: RoutingLevel;
-  baseScore: number;
-}
-
 /**
  * Extract usage from a non-streamed JSON response. Handles both Anthropic
  * Messages shape (input_tokens / cache_creation_input_tokens / …) and OpenAI
@@ -268,7 +266,7 @@ export type AccountResult =
 
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
-const ROUTING_CACHE_TTL_MS = 10 * 60 * 1000;
+const STICKY_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 const ROUTING_CACHE_MAX_ENTRIES = 2048;
 const USAGE_ACTIVE_IDLE_REFRESH_MS = 10 * 60 * 1000;
 const USAGE_IDLE_REFRESH_MS = 60 * 60 * 1000;
@@ -365,9 +363,10 @@ export class AccountManager {
   private refreshPolicy: RefreshPolicy;
   private reloadPromise: Promise<ReloadStats> | null = null;
   private routingMode: RoutingMode;
-  private sessionBindings: Map<string, SessionBinding> = new Map();
-  private routingCacheHits = 0;
-  private routingCacheMisses = 0;
+  private sessionCache = new StickySessionCache({
+    ttlMs: STICKY_SESSION_TTL_MS,
+    maxEntries: ROUTING_CACHE_MAX_ENTRIES,
+  });
 
   constructor(authDir: string, opts: AccountManagerOptions) {
     this.authDir = authDir;
@@ -691,10 +690,10 @@ export class AccountManager {
     }
 
     const now = Date.now();
-    this.reapExpiredSessionBindings(now);
+    this.sessionCache.reapExpired(now);
 
     if (ctx?.sessionKey) {
-      const binding = this.sessionBindings.get(ctx.sessionKey);
+      const binding = this.sessionCache.get(ctx.sessionKey, now);
       if (binding && binding.expiresAt > now) {
         const acct = this.accounts.get(binding.email);
         if (
@@ -702,8 +701,7 @@ export class AccountManager {
           this.isStickyReusable(acct, now) &&
           this.isAccountAllowedForTier(acct.routingPlan.level, ctx?.apiKeyTier)
         ) {
-          this.routingCacheHits++;
-          this.touchSessionBinding(ctx.sessionKey, binding, now);
+          this.sessionCache.recordHit(ctx.sessionKey, binding, now);
           acct.routing.lastActiveAt = new Date(now).toISOString();
           this.maybeRefreshRoutingMetadata(acct, now, "activity");
           return {
@@ -723,7 +721,7 @@ export class AccountManager {
           };
         }
       }
-      this.routingCacheMisses++;
+      this.sessionCache.recordMiss();
     }
 
     const candidates = this.accountOrder
@@ -761,9 +759,9 @@ export class AccountManager {
     }
 
     let best = candidates[0];
-    let bestScore = this.scoreCodexCandidate(best.acct, now);
+    let bestScore = scoreCodexCandidate(best.acct, now);
     for (const candidate of candidates.slice(1)) {
-      const score = this.scoreCodexCandidate(candidate.acct, now);
+      const score = scoreCodexCandidate(candidate.acct, now);
       if (score > bestScore + 1e-9) {
         best = candidate;
         bestScore = score;
@@ -776,18 +774,11 @@ export class AccountManager {
     this.maybeRefreshRoutingMetadata(best.acct, now, "activity");
 
     if (ctx?.sessionKey) {
-      this.sessionBindings.set(ctx.sessionKey, {
-        email: best.email,
-        expiresAt:
-          now +
-          Math.min(
-            ROUTING_CACHE_TTL_MS,
-            this.computeSessionStickyDuration(best.acct, now),
-          ),
-        lastSeenAt: new Date(now).toISOString(),
-        model: ctx.model ?? null,
-      });
-      this.enforceSessionBindingLimit();
+      this.sessionCache.set(
+        ctx.sessionKey,
+        { email: best.email, model: ctx.model ?? null },
+        now,
+      );
     }
 
     return {
@@ -1045,13 +1036,7 @@ export class AccountManager {
     misses: number;
     hitRate: number;
   } {
-    const total = this.routingCacheHits + this.routingCacheMisses;
-    return {
-      size: this.sessionBindings.size,
-      hits: this.routingCacheHits,
-      misses: this.routingCacheMisses,
-      hitRate: total === 0 ? 0 : this.routingCacheHits / total,
-    };
+    return this.sessionCache.stats();
   }
 
   inspectNextAccount(ctx?: AccountSelectionContext): AccountDecisionInspection {
@@ -1223,7 +1208,7 @@ export class AccountManager {
 
     let sessionCache: "hit" | "miss" | "none" = "none";
     if (ctx?.sessionKey) {
-      const binding = this.sessionBindings.get(ctx.sessionKey);
+      const binding = this.sessionCache.get(ctx.sessionKey, now);
       if (binding && binding.expiresAt > now) {
         const bound = accounts.find((item) => item.email === binding.email) || null;
         if (bound) {
@@ -1404,8 +1389,8 @@ export class AccountManager {
       ctx?.apiKeyTier,
     );
     const available = acct.cooldownUntil <= now;
-    const resetUrgency = includeScore ? this.computeResetUrgency(acct, now) : null;
-    const finalScore = includeScore ? this.scoreCodexCandidate(acct, now) : null;
+    const resetUrgency = includeScore ? computeResetUrgency(acct.routing, now) : null;
+    const finalScore = includeScore ? scoreCodexCandidate(acct, now) : null;
     return {
       email,
       selected: false,
@@ -1629,31 +1614,6 @@ export class AccountManager {
     };
   }
 
-  private reapExpiredSessionBindings(now: number): void {
-    for (const [key, binding] of this.sessionBindings) {
-      if (binding.expiresAt <= now) this.sessionBindings.delete(key);
-    }
-  }
-
-  private touchSessionBinding(
-    key: string,
-    binding: SessionBinding,
-    now: number,
-  ): void {
-    binding.lastSeenAt = new Date(now).toISOString();
-    // Move to the back so Map iteration order doubles as LRU order.
-    this.sessionBindings.delete(key);
-    this.sessionBindings.set(key, binding);
-  }
-
-  private enforceSessionBindingLimit(): void {
-    while (this.sessionBindings.size > ROUTING_CACHE_MAX_ENTRIES) {
-      const oldest = this.sessionBindings.keys().next().value;
-      if (!oldest) break;
-      this.sessionBindings.delete(oldest);
-    }
-  }
-
   private isStickyReusable(acct: AccountState, now: number): boolean {
     if (acct.cooldownUntil > now) return false;
     if (acct.lastFailureKind === "auth" || acct.lastFailureKind === "forbidden")
@@ -1665,51 +1625,7 @@ export class AccountManager {
     accountLevel: RoutingLevel | undefined,
     apiKeyTier: ApiKeyTier | undefined,
   ): boolean {
-    if (!apiKeyTier) return true;
-    const level = accountLevel || "lite";
-    switch (apiKeyTier) {
-      case "admin":
-        return true;
-      case "pro":
-        return level === "lite" || level === "pro";
-      case "lite":
-        return level === "lite";
-      default:
-        return false;
-    }
-  }
-
-  private scoreCodexCandidate(acct: AccountState, now: number): number {
-    const resetUrgency = this.computeResetUrgency(acct, now);
-    const healthPenalty = Math.min(acct.failureCount * 0.15, 0.6);
-    return resetUrgency * 0.75 + acct.routingPlan.baseScore - healthPenalty;
-  }
-
-  private computeResetUrgency(acct: AccountState, now: number): number {
-    const { resetAt, resetPeriodMs } = acct.routing;
-    if (!resetAt || !resetPeriodMs || resetPeriodMs <= 0) return 0;
-    const remainingMs = new Date(resetAt).getTime() - now;
-    const clamped = Math.max(0, Math.min(remainingMs, resetPeriodMs));
-    return 1 - clamped / resetPeriodMs;
-  }
-
-  private computeSessionStickyDuration(
-    acct: AccountState,
-    now: number,
-  ): number {
-    const resetAtMs = acct.routing.resetAt
-      ? new Date(acct.routing.resetAt).getTime()
-      : null;
-    if (resetAtMs) {
-      const remainingMs = resetAtMs - now;
-      if (remainingMs > 0 && remainingMs <= 60 * 60 * 1000) {
-        return Math.max(
-          3 * 60 * 1000,
-          Math.min(15 * 60 * 1000, Math.floor(remainingMs / 4)),
-        );
-      }
-    }
-    return randomStickyDuration();
+    return isAccountAllowedForTier(accountLevel, apiKeyTier);
   }
 
   private maybeRefreshRoutingMetadata(
@@ -1755,53 +1671,6 @@ export class AccountManager {
     }
     return 10 * 60 * 1000;
   }
-}
-
-function inferResetPeriodMs(planType: string | undefined): number | null {
-  switch ((planType || "").toLowerCase()) {
-    case "plus":
-    case "pro":
-      return 5 * 60 * 60 * 1000;
-    case "team":
-      return 30 * 24 * 60 * 60 * 1000;
-    default:
-      return null;
-  }
-}
-
-function inferWindowType(planType: string | undefined): string | null {
-  switch ((planType || "").toLowerCase()) {
-    case "plus":
-      return "plus_5h";
-    case "pro":
-      return "pro_5h";
-    case "team":
-      return "team_monthly";
-    default:
-      return null;
-  }
-}
-
-function planTypeBias(planType: string | undefined): number {
-  switch ((planType || "").toLowerCase()) {
-    case "plus":
-      return 0.08;
-    case "pro":
-      return 0.05;
-    case "team":
-      return 0.03;
-    case "free":
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-function buildRoutingPlan(token: TokenData): RoutingPlan {
-  return {
-    level: (token.routing?.level || "lite").toLowerCase() as RoutingLevel,
-    baseScore: planTypeBias(token.planType) + (token.routing?.bias ?? 0),
-  };
 }
 
 function parseRetryAfterMs(header: string): number | null {

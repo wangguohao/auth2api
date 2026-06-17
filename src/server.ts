@@ -2,7 +2,7 @@ import express from "express";
 import { Config, isDebugLevel, resolveTierLimit } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
-import { ApiKeyRegistry } from "./auth/api-key-registry";
+import { ApiKeyStore } from "./registry/api-key-store";
 import { ApiKeyTier } from "./auth/types";
 import {
   createChatCompletionsHandler,
@@ -22,6 +22,7 @@ import {
   TraceRecorder,
 } from "./observability/trace";
 import { generateDailyReport } from "./observability/report";
+import { snapshotAccountStore } from "./registry/account-store";
 
 /** 统计接口允许查询的最大自然日跨度。 */
 const STATS_QUERY_MAX_DAYS = 7;
@@ -140,7 +141,7 @@ function bumpFixedWindowCounter(
 export function createServer(
   config: Config,
   registry: ProviderRegistry,
-  apiKeyRegistry: ApiKeyRegistry,
+  apiKeyRegistry: ApiKeyStore,
   statsRecorder?: StatsRecorder,
   traceRecorder?: TraceRecorder,
   sendMail?: (
@@ -563,28 +564,8 @@ export function createServer(
   });
 
   app.get(ROUTES.adminAccounts.path, (_req, res) => {
-    const providers: Record<
-      string,
-      {
-        accounts: unknown[];
-        account_count: number;
-        routing_cache: {
-          size: number;
-          hits: number;
-          misses: number;
-          hitRate: number;
-        };
-      }
-    > = {};
-    for (const p of registry.all()) {
-      providers[p.id] = {
-        accounts: p.manager.getSnapshots(),
-        account_count: p.manager.accountCount,
-        routing_cache: p.manager.getRoutingCacheStats(),
-      };
-    }
     res.json({
-      providers,
+      providers: snapshotAccountStore(registry.all()),
       generated_at: new Date().toISOString(),
     });
   });

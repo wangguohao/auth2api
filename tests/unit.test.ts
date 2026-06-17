@@ -1813,6 +1813,7 @@ test("createServer exposes account decision diagnostics without mutating selecti
     apiKeyTier: "pro",
   });
   assert.equal(seeded.account?.token.email, "b@example.com");
+  const beforeInspectStats = manager.getRoutingCacheStats();
 
   const app = createServer(
     {
@@ -1869,6 +1870,7 @@ test("createServer exposes account decision diagnostics without mutating selecti
     assert.equal(selected.selected, true);
     assert.equal(selected.sessionBinding.matched, true);
     assert.match(selected.reasons.join(","), /selected:session_binding/);
+    assert.deepEqual(manager.getRoutingCacheStats(), beforeInspectStats);
 
     const after = manager.getNextAccount({
       sessionKey: "session-2",
