@@ -1,0 +1,96 @@
+tests/codex.test.ts
+  s_4141b804cb8472::t_f47e37bfa0c276 70-89
+  s_4141b804cb8472::t_5d1b19160df5cb 351-383
+  s_7143ae9b79ae75::t_5e2bbfa47804b0 27-31,759-790
+src/providers/codex.ts
+  s_4141b804cb8472::t_e5c63a1e823e1a 27-28
+scripts/auth-errors.ts
+  s_7143ae9b79ae75::t_fee04ab9218f19 12,40,44-46,180
+  s_7143ae9b79ae75::t_70adfe5ce59d58 1-11,13-39,41-43,47-179,181-207
+scripts/install-mihomo-systemd.sh
+  s_4141b804cb8472::t_7cc5fa79254478 89,117
+  s_4141b804cb8472::t_1d3711bbb33064 1-88,90-116,118-162
+src/utils/account-proxy.ts
+  s_4141b804cb8472::t_ea044e56a1fa97 8-14,19-21
+  s_4141b804cb8472::t_bd176e22a6b87c 1-7,15-18,22-50
+package.json
+  s_7143ae9b79ae75::t_6b211e32622c1c 11-12
+src/auth/types.ts
+  s_4141b804cb8472::t_bd176e22a6b87c 44-45
+tests/unit.test.ts
+  s_4141b804cb8472::t_f47e37bfa0c276 63-65,82-84
+src/upstream/codex-api.ts
+  s_4141b804cb8472::t_487f65e08ed8b8 5,112-121
+scripts/mihomo-new-instance-from-yaml.sh
+  s_4141b804cb8472::t_39239e905538ac 1-198
+tests/cursor.test.ts
+  s_4141b804cb8472::t_ea044e56a1fa97 313-314
+src/providers/cursor.ts
+  s_4141b804cb8472::t_e5c63a1e823e1a 21,23-26
+src/providers/anthropic.ts
+  s_4141b804cb8472::t_e5c63a1e823e1a 41-42
+src/upstream/codex-usage.ts
+  s_4141b804cb8472::t_487f65e08ed8b8 7,97-105
+README_CN.md
+  s_808098ac46cd54::t_877a1c3560fc16 9,11,13-15,17-27,32-35,48,51,54,57-60,63,68,70-73,75,77,80,84,86-87,90,105,107,109,111,113,115-118,120,122,124,126,128,130-132,134,136,138-140,142,144-145,147,149-154,156,158-160,162,164,166-168,170-171,173-182,184,186-189,191-192,194-205,207-211,213,215-225,228,230-236,238,240,242,244-245,247,249,251,253,255,257-268,270,272,274-276,278,280-281,283,285,287-288,290,293-296,298-299,302,304-308,310,313-321,324,326,329,332,335,338,340-341,343,346-348,351,353-354
+  s_4141b804cb8472::t_54e9bd469bd5b3 5,7
+  s_4141b804cb8472::t_242da65b351434 81,88,92,94-97
+src/upstream/codex-models.ts
+  s_4141b804cb8472::t_487f65e08ed8b8 2,61-69
+src/auth/routing-extra.ts
+  s_4141b804cb8472::t_bd176e22a6b87c 21-40,56,63,65-67,75,88
+src/upstream/anthropic-api.ts
+  s_4141b804cb8472::t_487f65e08ed8b8 7,219-228,258-267
+src/auth/oauth.ts
+  s_4141b804cb8472::t_361dea2c2af63b 3,74-88,112,117
+src/auth/cursor/oauth.ts
+  s_4141b804cb8472::t_361dea2c2af63b 4,41,51,62-74,106,112
+src/upstream/cursor-api.ts
+  s_4141b804cb8472::t_487f65e08ed8b8 9,1637-1647,1649-1650
+docs/vps-proxy-runbook.md
+  s_4141b804cb8472::t_54e9bd469bd5b3 1-346
+src/auth/codex/oauth.ts
+  s_4141b804cb8472::t_361dea2c2af63b 4,136,142-154,176,182
+src/accounts/manager.ts
+  s_4141b804cb8472::t_17fbcd503daf4c 313,1586
+  s_4141b804cb8472::t_5156eacbac8b1e 27-28,67-79,899-902
+  s_7143ae9b79ae75::t_c929c720b0a504 13,1620-1622,1628-1646,1652-1670
+README.md
+  s_808098ac46cd54::t_877a1c3560fc16 9,11,13-15,17-27,32-35,37,51,54,57-60,63,68,70-73,75,77,80,84,86-87,90,99,102,105,107,109,111,113,115-118,120,122,124,126,128,130-132,134,136,138-140,142,144-145,147,149-154,156,158-160,162,164,166-168,170-171,173-182,184,186-189,191-192,194-205,207-211,213,215-225,228,230-236,238,240,242,244-245,247,249,251,253,255,257-268,270,272,274-276,278,280-281,283,285,287-288,290,293-296,298-299,302,304-308,310,313-321,324,326,329,332,335,338,340-341,343,346-348,351,353-354
+  s_4141b804cb8472::t_242da65b351434 81,88,92,94-97
+  s_4141b804cb8472::t_9dda3cacdeb7b5 5,7
+src/observability/auth-errors.ts
+  s_7143ae9b79ae75::t_1ae02ee5811d4c 1-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "dc75f668f6220449e964d8b350fbf298766eb786",
+  "prompts": {},
+  "sessions": {
+    "s_4141b804cb8472": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed564-4be3-76d2-baf0-1d949897e57b",
+        "model": "gpt-5.4"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    },
+    "s_7143ae9b79ae75": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed528-49e6-7af2-9071-0628f86ef2a7",
+        "model": "gpt-5.4"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    },
+    "s_808098ac46cd54": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed566-1299-79e2-ac37-dd0ce607bbb2",
+        "model": "gpt-5.4"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
