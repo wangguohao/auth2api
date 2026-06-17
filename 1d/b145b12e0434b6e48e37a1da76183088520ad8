@@ -1,0 +1,37 @@
+src/auth/token-storage.ts
+  s_eaefbeca99da4d::t_832c723e09a4cb 49,71
+src/utils/http.ts
+  s_eaefbeca99da4d::t_f8da0f64f28beb 317-328
+src/auth/types.ts
+  s_eaefbeca99da4d::t_a9867208820e51 25-26,46-68,80
+src/accounts/manager.ts
+  s_eaefbeca99da4d::t_85e85f48889737 560-561,587,589,616,618
+  s_eaefbeca99da4d::t_ade7d8e382d98a 170-177
+  s_eaefbeca99da4d::t_99f5b426d58658 1648
+  s_eaefbeca99da4d::t_b700805a09bc7d 1666,1679-1684,1686-1716,1726-1727,1729
+  s_eaefbeca99da4d::t_8ccfe10ce66f5e 7
+  s_eaefbeca99da4d::t_9f8b38c68afffc 1139,1167-1169,1411,1717-1725
+  s_eaefbeca99da4d::t_3e35b55d3a2475 1424,1429,1438-1440
+  s_eaefbeca99da4d::t_f6479e316755ec 359-368
+  s_eaefbeca99da4d::t_2a8de6cf871f9a 1516,1524,1544-1547
+  s_eaefbeca99da4d::t_349a9829398dff 1665,1667-1678,1685
+  s_eaefbeca99da4d::t_04124e3ae8584c 761-767
+  s_eaefbeca99da4d::t_920f41553e281f 674-682,685-688
+  s_eaefbeca99da4d::t_cadba9743b6b9c 937,1032
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "1db145b12e0434b6e48e37a1da76183088520ad8",
+  "prompts": {},
+  "sessions": {
+    "s_eaefbeca99da4d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed505-8a65-7e91-9fc7-6916876ddad4",
+        "model": "gpt-5.4"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
