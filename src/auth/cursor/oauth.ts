@@ -1,6 +1,7 @@
 import { TokenData } from "../types";
 import { decodeJwtPayload } from "../../utils/jwt";
 import { RefreshTokenExhaustedError } from "../refresh-errors";
+import { fetchWithAccountProxy } from "../../utils/account-proxy";
 import {
   CURSOR_CLIENT_ID,
   DEFAULT_CURSOR_CLIENT_VERSION,
@@ -37,8 +38,8 @@ interface CursorRefreshResponse {
   shouldLogout?: boolean;
 }
 
+/** Cursor refresh 尽量走账号代理，但主聊天链路仍是 HTTP/2 直连实现。 */
 export async function refreshCursorTokens(
-  refreshToken: string,
   previous: Partial<TokenData> = {},
 ): Promise<TokenData> {
   // Defensive guard: refuse to call /oauth/token with an empty or obviously
@@ -47,6 +48,7 @@ export async function refreshCursorTokens(
   // missing-refresh-token check) would burn its remaining cooldown budget
   // on doomed requests, and Cursor's auth backend treats repeated bad
   // refresh attempts as suspicious behaviour.
+  const refreshToken = previous.refreshToken;
   if (!refreshToken || refreshToken === previous.accessToken) {
     throw new RefreshTokenExhaustedError(
       "invalidated",
@@ -57,15 +59,19 @@ export async function refreshCursorTokens(
   const clientId =
     previous.cursorClientId || process.env.CURSOR_CLIENT_ID || CURSOR_CLIENT_ID;
 
-  const resp = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      client_id: clientId,
-      refresh_token: refreshToken,
-    }),
-  });
+  const resp = await fetchWithAccountProxy(
+    TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: clientId,
+        refresh_token: refreshToken,
+      }),
+    },
+    previous as TokenData,
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -97,14 +103,13 @@ export async function refreshCursorTokens(
 }
 
 export async function refreshCursorTokensWithRetry(
-  refreshToken: string,
-  previous: Partial<TokenData> = {},
+  token: Partial<TokenData> = {},
   maxRetries = 3,
 ): Promise<TokenData> {
   let lastErr: any;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await refreshCursorTokens(refreshToken, previous);
+      return await refreshCursorTokens(token);
     } catch (err) {
       lastErr = err;
       if (attempt >= maxRetries) break;

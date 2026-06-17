@@ -60,6 +60,9 @@ test("parseRoutingExtraArg parses routing bias and level", () => {
   assert.equal(parseRoutingExtraArg(undefined), undefined);
   assert.deepEqual(parseRoutingExtraArg('{"bias":1}'), { bias: 1 });
   assert.deepEqual(parseRoutingExtraArg('{"level":"pro"}'), { level: "pro" });
+  assert.deepEqual(parseRoutingExtraArg('{"proxy":"http://127.0.0.1:7890"}'), {
+    proxy: "http://127.0.0.1:7890/",
+  });
   assert.deepEqual(parseRoutingExtraArg('{"bias":1,"level":"lite"}'), {
     bias: 1,
     level: "lite",
@@ -75,6 +78,10 @@ test("parseRoutingExtraArg rejects invalid JSON and legacy fields", () => {
   assert.throws(
     () => parseRoutingExtraArg('{"routingBias":1}'),
     /Unsupported --routingExtra field: routingBias/,
+  );
+  assert.throws(
+    () => parseRoutingExtraArg('{"proxy":"socks5://127.0.0.1:7890"}'),
+    /only supports http:\/\/ or https:\/\//,
   );
 });
 

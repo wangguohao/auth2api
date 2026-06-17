@@ -1,6 +1,7 @@
 import { PKCECodes, TokenData } from "../types";
 import { decodeJwtPayload } from "../../utils/jwt";
 import { timeout } from "../../utils/common";
+import { fetchWithAccountProxy } from "../../utils/account-proxy";
 import {
   RefreshTokenExhaustedError,
   detectExhaustedReason,
@@ -132,21 +133,25 @@ export async function exchangeCodexCode(
 }
 
 export async function refreshCodexTokens(
-  refreshToken: string,
+  token: TokenData,
 ): Promise<TokenData> {
   // Refresh uses application/json body
   // (matches codex-rs/login/src/auth/manager.rs request_chatgpt_token_refresh).
   let resp: Response;
   try {
-    resp = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: CODEX_CLIENT_ID,
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      }),
-    });
+    resp = await fetchWithAccountProxy(
+      TOKEN_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: CODEX_CLIENT_ID,
+          grant_type: "refresh_token",
+          refresh_token: token.refreshToken,
+        }),
+      },
+      token,
+    );
   } catch (err: any) {
     const cause = err?.cause;
     const detail = cause
@@ -168,13 +173,13 @@ export async function refreshCodexTokens(
 }
 
 export async function refreshCodexTokensWithRetry(
-  refreshToken: string,
+  token: TokenData,
   maxRetries = 3,
 ): Promise<TokenData> {
   let lastErr: any;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await refreshCodexTokens(refreshToken);
+      return await refreshCodexTokens(token);
     } catch (err) {
       // Terminal failure — refresh token is permanently unusable. Do NOT
       // retry; the second attempt would invalidate it further (the backend

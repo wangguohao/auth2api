@@ -41,6 +41,8 @@ export type RoutingLevel = "lite" | "pro";
 export interface RoutingConfig {
   bias?: number;
   level?: RoutingLevel;
+  /** 账号级 HTTP(S) 代理地址，例如 `http://127.0.0.1:7890`。 */
+  proxy?: string;
 }
 
 /** 持久化到 token JSON 的单个用量窗口快照。 */

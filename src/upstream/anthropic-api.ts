@@ -4,6 +4,7 @@ import { IncomingHttpHeaders } from "http";
 import { CloakingConfig, Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 import { extractApiKey, hashApiKey } from "../utils/common";
 
 const BASE_URL = "https://api.anthropic.com";
@@ -215,12 +216,16 @@ export async function callAnthropicMessages(
     extractPassthroughHeaders(request.headers),
   );
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: newHeaders,
-    body: JSON.stringify(body),
-    signal: withTimeoutSignal(timeoutMs, options.signal),
-  });
+  const response = await fetchWithAccountProxy(
+    url,
+    {
+      method: "POST",
+      headers: newHeaders,
+      body: JSON.stringify(body),
+      signal: withTimeoutSignal(timeoutMs, options.signal),
+    },
+    account,
+  );
 
   return response;
 }
@@ -250,12 +255,16 @@ export async function callAnthropicCountTokens(
     apiKeyHash,
   );
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: newHeaders,
-    body: JSON.stringify(body),
-    signal: withTimeoutSignal(timeoutMs, options.signal),
-  });
+  const response = await fetchWithAccountProxy(
+    url,
+    {
+      method: "POST",
+      headers: newHeaders,
+      body: JSON.stringify(body),
+      signal: withTimeoutSignal(timeoutMs, options.signal),
+    },
+    account,
+  );
 
   return response;
 }

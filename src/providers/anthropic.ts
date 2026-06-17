@@ -38,8 +38,8 @@ const ADVERTISED_MODELS = [
 export function buildAnthropicProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {
     provider: "anthropic",
-    refresh: async (rt: string): Promise<TokenData> => {
-      const token = await refreshTokensWithRetry(rt);
+    refresh: async (tokenData: TokenData): Promise<TokenData> => {
+      const token = await refreshTokensWithRetry(tokenData);
       return { ...token, provider: "anthropic" };
     },
   });

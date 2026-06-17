@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "login": "tsx src/index.ts --login",
+    "auth:error-summary": "tsx scripts/auth-errors.ts summary",
+    "auth:error-trace": "tsx scripts/auth-errors.ts trace",
     "obs:report": "tsx scripts/observability.ts report",
     "obs:slow": "tsx scripts/observability.ts slow",
     "obs:trace": "tsx scripts/observability.ts trace",

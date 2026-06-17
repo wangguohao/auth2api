@@ -6,6 +6,7 @@ import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
 import { AccountManager, AvailableAccount } from "../accounts/manager";
 import { Config } from "../config";
 import { withTimeoutSignal } from "../utils/abort";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 import { DEFAULT_CURSOR_CLIENT_VERSION } from "../auth/cursor/storage";
 
 const DEFAULT_API_BASE_URL = "https://api2.cursor.sh";
@@ -1633,16 +1634,20 @@ export async function listCursorModels(
   const account = result.account;
   const url = `${cfg.cloaking.cursor?.["api-base-url"] || DEFAULT_API_BASE_URL}${MODELS_PATH}`;
   try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...__buildCursorHeaders(account, cfg),
-        "Content-Type": "application/json",
-        Accept: "application/json",
+    const resp = await fetchWithAccountProxy(
+      url,
+      {
+        method: "POST",
+        headers: {
+          ...__buildCursorHeaders(account, cfg),
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: "{}",
+        signal: AbortSignal.timeout(10_000),
       },
-      body: "{}",
-      signal: AbortSignal.timeout(10_000),
-    });
+      account,
+    );
     if (!resp.ok) throw new Error(`status ${resp.status}`);
     const parsed = (await resp.json()) as { models?: Array<Record<string, unknown>> };
     const ids = extractCursorModelIds(parsed);

@@ -10,6 +10,7 @@ import { saveToken, loadAllTokens } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
 import { StickySessionCache } from "../cache/sticky-session-cache";
+import { recordAuthError } from "../observability/auth-errors";
 import {
   buildRoutingPlan,
   computeResetUrgency,
@@ -23,6 +24,8 @@ import { isAccountAllowedForTier } from "../routing/account-router";
 // Reauth-required cooldown: long enough that the account doesn't keep
 // hitting the upstream, but bounded so a re-login auto-recovers next sweep.
 const REAUTH_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** 代理账号网络失败时固定冷却 5 分钟，避免坏代理被连续重试。 */
+const PROXY_NETWORK_COOLDOWN_MS = 5 * 60 * 1000;
 
 const DEFAULT_REFRESH_LEAD_MS = 4 * 60 * 60 * 1000; // anthropic default
 const REFRESH_CHECK_INTERVAL_MS = 60 * 1000; // check every 60s
@@ -60,6 +63,19 @@ const FAILURE_BACKOFF: Record<
   server: { baseMs: 5 * 1000, maxMs: 5 * 60 * 1000 },
   network: { baseMs: 5 * 1000, maxMs: 5 * 60 * 1000 },
 };
+
+/** 为单次失败计算冷却时长；代理网络故障优先走固定 5 分钟冷处理。 */
+function resolveFailureCooldownMs(
+  token: TokenData,
+  kind: AccountFailureKind,
+  failureCount: number,
+): number {
+  if (kind === "network" && token.routing?.proxy) {
+    return PROXY_NETWORK_COOLDOWN_MS;
+  }
+  const { baseMs, maxMs } = FAILURE_BACKOFF[kind];
+  return Math.min(baseMs * 2 ** Math.max(0, failureCount - 1), maxMs);
+}
 
 export interface UsageData {
   inputTokens: number;
@@ -294,7 +310,7 @@ const FAILURE_PRIORITY: Record<AccountFailureKind, number> = {
   auth: 4,
 };
 
-export type RefreshFn = (refreshToken: string) => Promise<TokenData>;
+export type RefreshFn = (token: TokenData) => Promise<TokenData>;
 export type UsageRefreshFn = (
   token: TokenData,
 ) => Promise<
@@ -880,10 +896,10 @@ export class AccountManager {
     acct.lastFailureAt = new Date().toISOString();
     acct.lastError = detail ? `${kind}: ${detail}` : kind;
 
-    const { baseMs, maxMs } = FAILURE_BACKOFF[kind];
-    const cooldownMs = Math.min(
-      baseMs * 2 ** Math.max(0, acct.failureCount - 1),
-      maxMs,
+    const cooldownMs = resolveFailureCooldownMs(
+      acct.token,
+      kind,
+      acct.failureCount,
     );
     acct.cooldownUntil = Date.now() + cooldownMs;
     this.maybeRefreshRoutingMetadata(acct, Date.now(), "failure");
@@ -1567,7 +1583,7 @@ export class AccountManager {
       console.log(
         `[${this.provider}] refreshing token for ${acct.token.email}…`,
       );
-      const refreshed = await this.refreshFn(acct.token.refreshToken);
+      const refreshed = await this.refreshFn(acct.token);
       const refreshAt = new Date().toISOString();
       // Compose the new token preserving fields the provider may not return.
       const newToken: TokenData = {
@@ -1601,17 +1617,57 @@ export class AccountManager {
         // Terminal — refresh token cannot be reused. Long cooldown + clear
         // operator-facing message; don't keep hammering the upstream.
         const message = `refresh token ${err.reason}; re-run \`auth2api --login --provider=${this.provider}\` to re-authorize`;
+        const cooldownUntil = new Date(
+          Date.now() + REAUTH_COOLDOWN_MS,
+        ).toISOString();
         acct.failureCount++;
         acct.totalFailures++;
         acct.lastFailureKind = "auth";
         acct.lastFailureAt = new Date().toISOString();
         acct.lastError = message;
-        acct.cooldownUntil = Date.now() + REAUTH_COOLDOWN_MS;
+        acct.cooldownUntil = new Date(cooldownUntil).getTime();
+        /** 认证错误单独落盘，便于分析 team 账号、多实例与 token 轮换问题。 */
+        recordAuthError(this.authDir, {
+          provider: this.provider,
+          email: acct.token.email,
+          accountUuid: acct.token.accountUuid || null,
+          planType: acct.token.planType || null,
+          terminal: true,
+          action: "reauthorize",
+          kind: "refresh_token_exhausted",
+          reason: err.reason,
+          httpStatus: err.httpStatus,
+          message,
+          detail: err.message,
+          refreshToken: acct.token.refreshToken,
+          accessToken: acct.token.accessToken,
+          lastRefreshAt: acct.lastRefreshAt,
+          cooldownUntil,
+        });
         console.error(
           `[${this.provider}] account ${acct.token.email} needs re-auth: ${message}`,
         );
       } else {
         this.recordFailure(acct.token.email, "auth", err.message);
+        /** 普通 refresh 失败同样保留现场，方便区分网络抖动和服务端作废。 */
+        recordAuthError(this.authDir, {
+          provider: this.provider,
+          email: acct.token.email,
+          accountUuid: acct.token.accountUuid || null,
+          planType: acct.token.planType || null,
+          terminal: false,
+          action: "retry",
+          kind: "refresh_failed",
+          message: err?.message || String(err),
+          detail: err?.stack || null,
+          refreshToken: acct.token.refreshToken,
+          accessToken: acct.token.accessToken,
+          lastRefreshAt: acct.lastRefreshAt,
+          cooldownUntil:
+            acct.cooldownUntil > 0
+              ? new Date(acct.cooldownUntil).toISOString()
+              : null,
+        });
         console.error(
           `[${this.provider}] token refresh failed for ${acct.token.email}: ${err.message}`,
         );

@@ -24,6 +24,11 @@ import { waitForCallback } from "../src/auth/callback-server";
 import http from "node:http";
 import { buildSessionBindingKey } from "../src/routing/session";
 import { fetchCodexUsage } from "../src/upstream/codex-usage";
+import {
+  authErrorFilePath,
+  readAuthErrorEvents,
+  recordAuthError,
+} from "../src/observability/auth-errors";
 
 // ══════════════════════════════════════════════════
 // utils/jwt.ts
@@ -60,6 +65,26 @@ test("decodeJwtPayload handles base64url padding", () => {
 
 test("decodeJwtPayload throws on malformed input", () => {
   assert.throws(() => decodeJwtPayload("not-a-jwt"));
+});
+
+test("token storage preserves routing proxy", () => {
+  const token: TokenData = {
+    accessToken: "access",
+    refreshToken: "refresh",
+    email: "proxy@example.com",
+    expiresAt: new Date().toISOString(),
+    accountUuid: "acct",
+    provider: "codex",
+    routing: {
+      bias: 1,
+      level: "pro",
+      proxy: "http://127.0.0.1:7890",
+    },
+  };
+  const storage = tokenToStorage(token);
+  assert.equal(storage.routing?.proxy, "http://127.0.0.1:7890");
+  const roundtrip = storageToToken(storage as TokenStorage);
+  assert.equal(roundtrip.routing?.proxy, "http://127.0.0.1:7890");
 });
 
 // ══════════════════════════════════════════════════
@@ -318,6 +343,39 @@ test("refreshAccount: subsequent refresh after completion calls fn again", async
     await manager.refreshAccount("x@y.z");
     await manager.refreshAccount("x@y.z");
     assert.equal(refreshCalls, 2);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("proxy-backed account network failure cools down for 5 minutes", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async (token: TokenData): Promise<TokenData> => token,
+    });
+    manager.addAccount({
+      accessToken: "access",
+      refreshToken: "refresh",
+      email: "proxy@example.com",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "acct",
+      provider: "codex",
+      routing: {
+        proxy: "http://127.0.0.1:7890",
+      },
+    });
+
+    const before = Date.now();
+    manager.recordFailure("proxy@example.com", "network", "proxy connect failed");
+    const snap = manager.getSnapshots()[0];
+    const cooldownMs = snap.cooldownUntil - before;
+
+    assert.ok(
+      cooldownMs >= 299_000 && cooldownMs <= 301_000,
+      `expected ~5min cooldown, got ${cooldownMs}ms`,
+    );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -693,6 +751,43 @@ test("performRefresh: RefreshTokenExhaustedError → terminal cooldown + clear m
       snap.cooldownUntil - Date.now() > 60 * 60 * 1000,
       "needs reauth → long cooldown",
     );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("recordAuthError persists refresh failure diagnostics as JSONL", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const event = recordAuthError(tmpDir, {
+      provider: "codex",
+      email: "team@example.com",
+      accountUuid: "acct_team",
+      planType: "team",
+      terminal: true,
+      action: "reauthorize",
+      kind: "refresh_token_exhausted",
+      reason: "invalidated",
+      httpStatus: 401,
+      message: "refresh token invalidated; re-run login",
+      detail: "refresh token invalidated (HTTP 401)",
+      refreshToken: "refresh-secret",
+      accessToken: "access-secret",
+      lastRefreshAt: "2026-06-15T12:24:58.986Z",
+      cooldownUntil: "2026-06-16T12:24:58.986Z",
+    });
+    const date = event.ts.slice(0, 10);
+    const file = authErrorFilePath(tmpDir, date);
+    const rows: any[] = [];
+    const count = await readAuthErrorEvents(file, (row) => rows.push(row));
+    assert.equal(count, 1);
+    assert.equal(rows[0].email, "team@example.com");
+    assert.equal(rows[0].accountUuid, "acct_team");
+    assert.equal(rows[0].planType, "team");
+    assert.equal(rows[0].reason, "invalidated");
+    assert.equal(rows[0].terminal, true);
+    assert.notEqual(rows[0].refreshTokenHash, "refresh-secret");
+    assert.notEqual(rows[0].accessTokenHash, "access-secret");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

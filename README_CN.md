@@ -2,33 +2,37 @@
 
 [English](./README.md)
 
-一个轻量级 OAuth 转 API 代理，把你的 Claude（Anthropic）、ChatGPT（OpenAI Codex）订阅，以及实验性的本地 Cursor 登录态变成可调用的 API，适配 Claude Code 与 OpenAI 兼容客户端。
+补充运维文档：
 
-auth2api 的定位很克制：
+- [VPS 代理迁移手册](./docs/vps-proxy-runbook.md)
 
-- 用自己的 Claude / ChatGPT / Cursor 登录态（每个 provider 可挂多个账号）
-- 一个本地或自托管代理
-- 按模型名自动路由到对应 provider
+`auth2api` 是一个轻量级 OAuth 转 API 代理，目标很直接：把你自己的上游登录态变成可在本地或自托管环境里调用的 API。
 
-它并不试图做成大型多 provider 网关。如果你想要的是一个体积小、容易理解、方便自己改的代理，auth2api 就是为这个场景准备的。
+当前支持三个 provider：
 
-## 功能特性
+- `anthropic`：Claude OAuth
+- `codex`：OpenAI 的 “Sign in with ChatGPT” OAuth
+- `cursor`：实验性的 Cursor 账号集成
 
-- **轻量优先**：代码量小、依赖和运行逻辑都尽量简单
-- **多 provider 共存**：Claude OAuth、OpenAI Codex（ChatGPT）OAuth 与实验性 Cursor 本地登录态同时支持，按 provider 独立维护账号池、cooldown、token 刷新与统计
-- **多账号支持**：每个 provider 都可加载多个 OAuth token，具备粘性路由、自动故障转移和逐账号用量统计
-- **OpenAI 兼容 API**：支持 `/v1/chat/completions`、`/v1/responses`、`/v1/models`
-- **Claude 原生透传**：支持 `/v1/messages` 与 `/v1/messages/count_tokens`
-- **适配 Claude Code**：兼容 `Authorization: Bearer` 和 `x-api-key`
-- **覆盖核心能力**：支持流式、工具调用、图片与 reasoning，而不引入大型框架
-- **结构化 JSON 输出**：支持 `response_format`（Chat API）和 `text.format`（Responses API）的结构化输出
-- **账号健康管理**：内置 cooldown、重试、带并发锁的 token 刷新、`/admin/accounts` 快照
-- **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
+项目刻意保持小而专注：一个代理、少量 provider、多账号路由，以及面向本地运维的管理和诊断能力。
+
+## 能力概览
+
+- 提供 OpenAI 兼容接口：`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`
+- 提供 Anthropic 兼容接口：`POST /v1/messages`、`POST /v1/messages/count_tokens`
+- 每个 provider 支持多账号，具备自动选号、故障转移、冷却、刷新和粘性路由
+- 按模型族自动路由到对应 provider，而不是把所有请求硬塞到同一个上游
+- 支持 API key 分层、按 key 并发限制、按 key 的 5 小时请求额度
+- 提供账号快照、路由决策、API key 管理、统计、热重载、日报生成等管理接口
+- 内置请求 trace 与 observability 工具，方便排查慢请求、失败请求和认证异常
 
 ## 运行要求
 
 - Node.js 20+
-- 一个 Claude 账号（推荐 Claude Max）
+- 至少一个上游账号：
+  - `anthropic` 需要 Claude 账号
+  - `codex` 需要 ChatGPT Plus / Pro
+  - `cursor` 需要浏览器授权或本地 Cursor 登录态（实验性）
 
 ## 安装
 
@@ -41,50 +45,56 @@ npm run build
 
 ## 登录
 
-auth2api 支持以下上游 provider：
-
-- `anthropic`（默认）：Claude OAuth，对应 `claude-*` 模型。
-- `codex`：OpenAI 的 "Sign in with ChatGPT" OAuth，直连官方 codex 后端 `https://chatgpt.com/backend-api/codex/responses`，对应 `gpt-5*`（含 `gpt-5-codex`）、`o\d*`、`codex-*` 模型。**需要 ChatGPT Plus 或 Pro 订阅** —— Free 账号也能登录，但首次调用会被后端拒绝(`model not supported`)。
-- `cursor`：实验性 Cursor 账号支持，默认走浏览器 PKCE deep-link 流程授权，也可以选择导入本机 Cursor Desktop 已登录的 token。**路由规则**：多 provider 同时登录时，Cursor 只服务带显式 `cursor-*` / `cr/*` 前缀的模型；进入 **Cursor-exclusive 模式**（即只有 Cursor 账号、没有 `anthropic`/`codex` 账号）后，所有请求 —— 包括裸的 `claude-*` 或 `gpt-*` 模型名 —— 都会自动路由到 Cursor，方便 Claude Code / OpenAI 客户端零改造直接用。
-
-通过 `--provider=` 选择登录哪个 provider，缺省为 `anthropic`。
-
-### 自动模式（需要本地浏览器）
+通过 `--provider=` 选择登录哪个 provider；默认是 `anthropic`。
 
 ```bash
-# Claude（默认）
+# Claude OAuth
 node dist/index.js --login
 
-# Codex（ChatGPT Plus/Pro）
+# ChatGPT / Codex OAuth
 node dist/index.js --login --provider=codex
-node dist/index.js --login --provider=codex --manual --routingExtra='{"bias":1,"level":"pro"}'
 
-# Cursor（实验性；默认打开浏览器走 PKCE 授权）
+# 远程机器上走手动回填
+node dist/index.js --login --provider=codex --manual
+
+# Cursor 浏览器授权（实验性）
 node dist/index.js --login --provider=cursor
 
-# Cursor —— 改为从本机 Cursor Desktop 登录态导入
+# 导入本机 Cursor Desktop 登录态
 node dist/index.js --login --provider=cursor --cursor-import-local
 node dist/index.js --login --provider=cursor --cursor-storage=/path/to/state.vscdb
 ```
 
-Anthropic 和 Codex 会输出浏览器 URL。完成授权后，回调会自动处理。Anthropic 流程使用端口 `54545`，Codex 使用端口 `1455` —— 请确保两者都没被防火墙拦截。Cursor 走的是自己专属的 deep-link PKCE 流程：`auth2api` 会打印一条 `https://cursor.com/loginDeepControl?...` URL，你在浏览器里点「Yes, Log In」确认后，`auth2api` 会持续轮询 `api2.cursor.sh/auth/poll` 直到拿到 token——整个过程不需要本地回调端口。如果偏好直接导入 Cursor Desktop 已有的登录态，可以加 `--cursor-import-local`，或用 `--cursor-storage=/path/to/state.vscdb` 指向自定义安装位置。
+说明：
 
-`--routingExtra` 会跟着 token 一起持久化，并在 `POST /admin/reload` 时热加载。支持字段只有 `bias` 和 `level`（`lite` 或 `pro`）；`routing.level` 没填时默认是 `lite`。对 codex 路由来说，`routing.bias` 会直接加到 smart routing 分数里；当你需要让某个账号长期优先被选中时，可以用它。
+- Anthropic 和 Codex 支持浏览器回调登录；部署在远程机器时可用 `--manual`
+- Cursor 走单独的 deep-link 浏览器流程，或直接导入本地登录态
+- 多次执行 `--login` 会继续向同一个 provider 的账号池里追加账号
+- 如果服务已经启动，登录成功后会自动触发一次 `POST /admin/reload`
 
-### 手动模式（适合远程服务器）
+### `--routingExtra`
+
+登录时可以把账号路由偏好一起写入 token：
 
 ```bash
-node dist/index.js --login --manual
-node dist/index.js --login --provider=codex --manual
+node dist/index.js --login --provider=codex --routingExtra='{"bias":1,"level":"pro"}'
+node dist/index.js --login --provider=codex --routingExtra='{"bias":1,"level":"pro","proxy":"http://127.0.0.1:7890"}'
 ```
 
-在浏览器中打开输出的链接。授权完成后，浏览器会跳转到一个 `localhost` 地址，这个页面可能无法打开；请把地址栏中的完整 URL 复制回终端。
+当前支持的字段：
 
-多个 provider 可以同时登录，每个 provider 也可以多次执行 `--login` 添加更多账号；token 文件会并存于 `auth-dir`（`claude-<email>.json`、`codex-<email>.json` 与 `cursor-<email>.json`），收到请求后按模型名自动路由到对应账号池。只登录其中一个也可以，未登录的 provider 不会出现在 `/v1/models` 中。
+- `bias`：调整选号优先级
+- `level`：`lite` 或 `pro`
+- `proxy`：账号级 HTTP(S) 代理地址，例如 `http://127.0.0.1:7890`
 
-> **关于 Codex：** codex provider 中转的是你的 ChatGPT Plus/Pro 订阅额度。OpenAI 的 ToS 不允许通过第三方工具中转 ChatGPT 会话 —— 仅供本地个人自用。
+这些值会随 token 一起持久化，并在 `POST /admin/reload` 时重新加载。
 
-> **关于 Cursor：** cursor provider 是研究性质集成，依赖非公开、逆向得到的 Cursor API（`api2.cursor.sh` 上的 HTTP/2 + Connect-RPC + protobuf）。Cursor 升级后可能随时失效，也可能违反 Cursor 服务条款或触发账号风险；仅建议本地个人实验使用。
+说明：
+
+- `proxy` 当前走的是标准 HTTP(S) 代理，最适合直接接 Clash 的 `http-port` 或 `mixed-port`
+- 如果你在 Clash 里只是点选了某个节点，**这个节点本身不会直接变成一个可填的 URL**；auth2api 里通常填的是 Clash 本地代理入口，例如 `http://127.0.0.1:7890`
+- 如果你想让某个 auth2api 账号固定走某一条线路，需要在 Clash 侧把该流量稳定导向目标节点；仅切换全局 Selector 而不做隔离时，所有走同一个 Clash 端口的账号都会一起切换
+- Cursor 主聊天链路目前仍是自建 HTTP/2 直连传输；`routingExtra.proxy` 已覆盖大部分 fetch 请求（如 Anthropic/Codex 上游、refresh、models/usage），但 **Cursor 聊天主链路暂未接入账号级代理**
 
 ## 启动服务
 
@@ -92,58 +102,122 @@ node dist/index.js --login --provider=codex --manual
 node dist/index.js
 ```
 
-默认监听地址为 `http://127.0.0.1:8317`。首次启动时，会自动生成 bootstrap admin key 并写入 `config.yaml`。客户端和 admin API key 都保存在 `<auth-dir>/api-keys.json`，通过 `/admin/api-keys` 管理。
+默认监听：
+
+- `http://127.0.0.1:8317`
+
+如果 `bootstrap-admin-key` 为空，首次启动会自动生成并写回 `config.yaml`。
+
+## 路由规则
+
+provider 路由由模型名驱动：
+
+- `cursor-*` 和 `cr/*` 强制走 `cursor`
+- `gpt-5*`、`o*`、`codex-*` 走 `codex`
+- `claude-*` 以及 Anthropic 别名走 `anthropic`
+- 未识别模型默认回退到 `anthropic`
+
+### Cursor 独占模式
+
+如果当前只有 `cursor` 登录了账号，而 `anthropic` 和 `codex` 都没有账号，那么所有模型名都会自动路由到 Cursor，包括裸的 `claude-*` 和 `gpt-*`。这意味着 Cursor-only 部署可以直接给现成的 Anthropic/OpenAI 客户端使用，不需要额外加 `cursor-` 前缀。
+
+### `/v1/models`
+
+`GET /v1/models` 只会列出当前已加载账号的 provider 的模型。
+
+不要把 README 里的模型列表示例当成真实来源，原因是：
+
+- Codex 模型集合和账号权限直接相关，运行时动态拉取
+- Cursor 模型会优先走内部模型列表，拿不到时才使用 fallback
+- Anthropic / Cursor 的别名和翻译逻辑可能继续演进
+
+## 接口兼容性
+
+### OpenAI 兼容接口
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `GET /v1/models`
+
+### Anthropic 兼容接口
+
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+
+### Provider 支持矩阵
+
+| Endpoint | anthropic | codex | cursor |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | 支持 | 支持 | 支持 |
+| `POST /v1/responses` | 支持 | 支持 | 支持 |
+| `POST /v1/messages` | 支持 | 支持 | 支持 |
+| `POST /v1/messages/count_tokens` | 支持 | `501` | `501` |
+
+实现说明：
+
+- `codex` 通过内部 Responses 翻译链统一承接 Chat、Responses、Anthropic 风格请求
+- `cursor` 上游只支持流式，必要时会在本地聚合后再返回给非流式客户端
+- 当 `/v1/messages` 实际由 Cursor 提供服务时，会被重新编码成 Anthropic Messages SSE，以兼容 Claude Code
 
 ## 配置
 
-复制 `config.example.yaml` 为 `config.yaml`，然后按需修改：
+把 `config.example.yaml` 复制为 `config.yaml` 后按需修改：
 
 ```yaml
-host: "" # 绑定地址，空字符串表示 127.0.0.1
+host: ""
 port: 8317
 
-auth-dir: "~/.auth2api" # OAuth token 存储目录
-
-bootstrap-admin-key: "sk-bootstrap-admin" # 初始 admin key；首次启动未配置时会自动生成并写回
+auth-dir: "~/.auth2api"
+bootstrap-admin-key: "sk-bootstrap-admin"
 
 api-key-tier-limits:
   lite:
-    concurrency: 5 # lite 默认值
-    max-requests-5h: 300 # lite 5 小时窗口
+    concurrency: 5
+    max-requests-5h: 300
   pro:
-    concurrencyMultiplier: 2 # pro = lite * 2
+    concurrencyMultiplier: 2
     max-requests-multiplier: 2
   admin:
-    concurrencyMultiplier: 2 # admin = lite * 2
+    concurrencyMultiplier: 2
     max-requests-multiplier: 2
 
-body-limit: "200mb" # 最大 JSON 请求体大小，适合大上下文场景
+body-limit: "200mb"
 
 timeouts:
-  messages-ms: 120000 # 非流式 /v1/messages 超时
-  stream-messages-ms: 600000 # 流式 /v1/messages 超时（10 分钟，适合 Claude Code 长任务）
-  count-tokens-ms: 30000 # /v1/messages/count_tokens 超时
+  messages-ms: 120000
+  stream-messages-ms: 600000
+  count-tokens-ms: 30000
 
-# 请求指纹 — 控制 auth2api 如何模拟 Claude Code CLI
+stats:
+  enabled: true
+
+observability:
+  enabled: false
+  trace:
+    enabled: true
+    retentionDays: 14
+  report:
+    enabled: false
+    scheduleHour: 2
+    timezone: "Asia/Shanghai"
+    retentionDays: 14
+    recipients:
+      - "ops@example.com"
+
+mail:
+  provider: "resend"
+  resend:
+    apiKey: "re_xxx"
+    from: "auth2api Report <report@example.com>"
+
+debug: "off"
+
 cloaking:
-  cli-version: "2.1.88" # 模拟的 CLI 版本号
-  entrypoint: "cli" # 计费归属入口（cli、mcp、sdk 等）
-
-debug: "off" # off | errors | verbose
-```
-
-`debug` 支持三级日志：
-
-- `off`：不输出额外调试日志
-- `errors`：记录上游/网络失败信息和上游错误响应正文
-- `verbose`：在 `errors` 基础上，再输出每个请求的方法、路径、状态码和耗时
-
-`api-key-tier-limits` 用来控制按 `api-key` tier 的并发数和 5 小时请求上限。`lite` 是基础档，`pro` 和 `admin` 都是基于 `lite` 的倍数，可单独调参。服务端会对当前认证 key 所属 tier 应用限额，超限时返回 `429` 和 `Retry-After`。`api-key-rate-limit` 目前只作为旧配置兼容保留。
-
-如果 Cursor 上游版本门禁变化，可以覆盖这些实验性请求头。`agent-base-url` 是 chat host 的兼容别名，目前与 `api-base-url` 都指向 `api2.cursor.sh`：
-
-```yaml
-cloaking:
+  cli-version: "2.1.88"
+  entrypoint: "cli"
+  codex:
+    originator: "codex_cli_rs"
+    cli-version: "0.125.0"
   cursor:
     client-version: "2.3.41"
     client-type: "ide"
@@ -151,357 +225,130 @@ cloaking:
     api-base-url: "https://api2.cursor.sh"
 ```
 
-## 使用方法
+重点配置项：
 
-将任意 OpenAI 兼容客户端指向 `http://127.0.0.1:8317`：
+- `auth-dir`：token、API key、统计与 trace 的存储目录
+- `api-key-tier-limits`：按 tier 配置并发和额度
+- `stats.enabled`：是否记录请求统计并写入 `stats.jsonl`
+- `observability.*`：是否采集 trace、生成 HTML 日报
+- `mail.*`：日报邮件投递配置
+- `cloaking.*`：上游请求指纹与版本号配置
+- `debug`：`off`、`errors`、`verbose`
+
+## 鉴权与 API Key
+
+所有 `/v1/*` 接口都要求 API key。
+
+支持两种鉴权头：
+
+- `Authorization: Bearer <key>`
+- `x-api-key: <key>`
+
+所有 `/admin/*` 接口都要求一个启用中的 `admin` 级别 API key。
+
+API key 持久化在：
+
+- `<auth-dir>/api-keys.json`
+
+## 管理接口
+
+`/admin/*` 全部需要 admin API key。
+
+| Endpoint | 说明 |
+| --- | --- |
+| `GET /admin/accounts` | 查看各 provider 的账号快照 |
+| `POST /admin/accounts/usage/refresh` | 刷新全部或指定账号的 usage |
+| `GET /admin/accounts/decision` | 查看 provider / account 路由决策 |
+| `GET /admin/stats` | 查看聚合后的请求统计 |
+| `GET /admin/api-keys` | 列出 API key |
+| `POST /admin/api-keys` | 创建 API key |
+| `POST /admin/api-keys/:id/enable` | 启用 API key |
+| `POST /admin/api-keys/:id/disable` | 禁用 API key |
+| `POST /admin/reload` | 从磁盘热重载 token 和 API key |
+| `POST /admin/reports/daily` | 生成日报，可选发送邮件 |
+
+### `/admin/stats` 查询规则
+
+`GET /admin/stats` 支持：
+
+- `date=YYYY-MM-DD`
+- 或 `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+- 可选 `locale=zh-CN`
+
+限制：
+
+- 查询范围必须在最近 7 天内
+- 单次跨度最多 7 天
+
+## 可观测性与诊断
+
+开启 observability 后：
+
+- trace 会写到 `<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`
+- HTML 日报会写到 `<auth-dir>/observability/reports/daily-YYYY-MM-DD.html`
+
+辅助脚本：
+
+```bash
+npm run obs:slow -- --date YYYY-MM-DD --limit 20
+npm run obs:trace -- --date YYYY-MM-DD --trace-id <trace-id>
+npm run obs:explain -- --date YYYY-MM-DD --trace-id <trace-id>
+npm run obs:report -- --date YYYY-MM-DD [--send-email]
+
+npm run auth:error-summary -- --date YYYY-MM-DD
+npm run auth:error-trace -- --date YYYY-MM-DD
+```
+
+这些脚本可用于：
+
+- 查看当天最慢请求
+- 查看单条 trace 原始事件
+- 对慢请求做启发式耗时归因
+- 手动触发日报生成
+- 排查重复出现的登录/刷新失败
+
+## 请求示例
 
 ```bash
 curl http://127.0.0.1:8317/v1/chat/completions \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 1024
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      { "role": "user", "content": "Hello" }
+    ]
   }'
 ```
 
-### 支持的模型
-
-`GET /v1/models` 只列出已登录 provider 的模型。Codex 列表是从 `chatgpt.com/backend-api/codex/models` **实时拉取**(5 分钟缓存 + ETag),始终与你的账号实际可用模型一致。Cursor 会尽量从内部 AvailableModels 端点拉取，失败时使用少量 fallback 模型。当前 ChatGPT 账号支持的 codex 模型集合:
-
-| 模型 ID                                              | Provider  | 说明                                         |
-| ---------------------------------------------------- | --------- | -------------------------------------------- |
-| `claude-opus-4-7`                                    | anthropic | Claude Opus 4.7                              |
-| `claude-opus-4-6`                                    | anthropic | Claude Opus 4.6                              |
-| `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                            |
-| `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                             |
-| `claude-haiku-4-5`                                   | anthropic | Claude Haiku 4.5 别名                        |
-| `gpt-5.5`                                            | codex     | GPT-5.5(reasoning model)                     |
-| `gpt-5.4`                                            | codex     | GPT-5.4                                      |
-| `gpt-5.4-mini`                                       | codex     | GPT-5.4 Mini                                 |
-| `gpt-5.3-codex`                                      | codex     | GPT-5.3(Codex 变体)                          |
-| `gpt-5.2`                                            | codex     | GPT-5.2                                      |
-| `cursor-claude-opus-4-7-medium`                      | cursor    | 通过 Cursor 转发的 Claude Opus 4.7           |
-| `cursor-claude-sonnet-4-7-medium`                    | cursor    | 通过 Cursor 转发的 Claude Sonnet 4.7         |
-| `cursor-default`                                     | cursor    | Cursor "Auto" 模型                           |
-| `cursor-premium` / `cursor-fast` / `cursor-composer` | cursor    | AvailableModels 拉取失败时使用的 fallback id |
-
-auth2api 额外支持以下便捷别名：
-
-- `opus` -> `claude-opus-4-7`
-- `sonnet` -> `claude-sonnet-4-6`
-- `haiku` -> `claude-haiku-4-5-20251001`
-
-路由规则：根据模型名自动选择账号池。`claude-*` 与裸别名 `opus`/`sonnet`/`haiku` 走 Claude 账号；`gpt-5*`、`o\d`(`o3`、`o4-mini` 等)、`codex-*` 走 Codex 账号；`cursor-*` 和 `cr/*` 走 Cursor 账号。其它型号(`gpt-3.5-*`、`gpt-4*` 等)两个后端都不支持，默认 fallback 到 anthropic。如果对应 provider 未登录，请求会返回 `503 no_account_for_provider`，错误信息中带有需要执行的 `--login` 命令。
-
-#### "Cursor 独占" 模式（让 Claude Code / OpenAI SDK 零配置可用）
-
-当 **只有 Cursor 一个 provider 登录了账号**（anthropic、codex 都为空）时，所有模型名自动走 Cursor，`cursor-` 前缀变成可选。这意味着 Cursor 单 provider 的 auth2api 可以直接当 Anthropic API 或 OpenAI API 用：
-
-| 客户端发送                                                 | auth2api 行为                                                |
-| ---------------------------------------------------------- | ------------------------------------------------------------ |
-| `POST /v1/messages` `{"model":"claude-sonnet-4-5"}`        | 走 Cursor，把上游流重新编码成 Anthropic Messages SSE         |
-| `POST /v1/messages` `{"model":"opus"}`                     | `opus` → `claude-opus-4-7-medium`，回 Anthropic Messages SSE |
-| `POST /v1/responses` `{"model":"gpt-5.5"}`                 | `gpt-5.5` → `gpt-5.5-medium`，回 OpenAI Responses SSE        |
-| `POST /v1/chat/completions` `{"model":"claude-haiku-4-5"}` | `claude-haiku-4-5` → `claude-4.5-haiku`                      |
-
-内置一份小的别名映射表，覆盖 Anthropic / OpenAI SDK 与 Claude Code 默认会用的标准名（`claude-sonnet-4-5`、`claude-opus-4-7`、`opus`、`sonnet`、`haiku`、`gpt-5.5`、`o3` 等），翻译到 Cursor 内部 SKU（`claude-4.5-sonnet`、`claude-opus-4-7-medium`、`gpt-5.5-medium` 等）。可以通过环境变量 `CURSOR_MODEL_ALIASES="my-name=claude-opus-4-7-max,foo=composer-2"` 扩展。表里没有的名字会原样下发到 Cursor，所以 Cursor 的完整 SKU 列表（如 `claude-opus-4-7-thinking-max`）依然可用。
-
-当 **多个 provider 都登录了账号** 时，按上面的历史路由表分发；显式前缀 `cursor-` / `cr/` 依然能强制走 Cursor，但 `claude-*` 会去你的 Anthropic OAuth 账号。
-
-##### Cursor 上的 Claude Code Anthropic SSE
-
-`POST /v1/messages` 命中 Cursor 服务的模型时，输出严格遵循 Anthropic Messages SSE 格式（`message_start` → `content_block_start`/`content_block_delta` → `message_delta` → `message_stop`）。Thinking 模型的 reasoning 字节会被路由到 `thinking` content block，再切换到 `text` block 输出正文 —— 与 Claude Code 的期待一致。Cursor 只支持流式，所以即使客户端没传 `stream:true`，命中 cursor 的 `/v1/messages` 也会以 SSE 形式回应。
-
-### 端点 × Provider 支持矩阵
-
-| Endpoint                         | anthropic | codex                                                         | cursor                                                                   |
-| -------------------------------- | --------- | ------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `POST /v1/chat/completions`      | ✅        | ✅（Chat ↔ Responses 翻译；reasoning 走 `reasoning_content`） | ✅（`chat.completion.chunk` SSE；reasoning 走 `reasoning_content` 字段） |
-| `POST /v1/responses`             | ✅        | ✅（直通）                                                    | ✅                                                                       |
-| `POST /v1/messages`              | ✅        | ✅（Anthropic ↔ Responses 翻译，详见下文）                    | ✅（Anthropic Messages SSE，详见下文）                                   |
-| `POST /v1/messages/count_tokens` | ✅        | ❌（501）                                                     | ❌（501）                                                                |
-
-针对 Cursor，三个 OpenAI 兼容端点全部走原生实现（不经过 anthropic 翻译链）：`req.path` 决定 cursor provider 输出的协议格式（`openai-chat-completions` / `openai-responses` / `anthropic-messages`）。非流式 `/v1/chat/completions` 通过把上游 SSE 聚合成单个 `chat.completion` JSON 来支持。
-
-针对 Codex（ChatGPT 账号后端），通过专用的 Chat ↔ Responses ↔ Anthropic 翻译器对（`src/upstream/responses-translator.ts`）也实现了相同覆盖：客户端发来的 Chat / Anthropic 请求被翻译成 OpenAI Responses 格式发到上游，上游返回的 Responses SSE 再翻译回原本的格式；非流式请求在 handler 内聚合 SSE 后输出单条 JSON。Tool calls、system prompts（被抬升到 `instructions`）、`reasoning_effort` / `thinking`、多轮对话、`response_format` `json_schema` 都已支持。Codex 特有的不兼容字段（`max_output_tokens`、`parallel_tool_calls`）会在 codex handler 里自动剥除，无需调用方关心。
-
-#### Codex `/v1/responses` 请求体要求
-
-ChatGPT 的 codex 后端会拒绝缺少 `stream: true`、`store: false`、`instructions` 任一字段的请求，并且对 `max_output_tokens`、`parallel_tool_calls` 这类公共 Responses 字段会直接 400。auth2api 对所有三个 codex 端点（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`）统一采用 sanitize + 强制流式的策略：
-
-- 客户端没传 `store: false` / `instructions` 时**自动补默认值**。
-- `max_output_tokens` 和 `parallel_tool_calls` 会被剥除 —— token 上限由 ChatGPT 套餐控制。
-- 上游调用**始终**带 `stream: true`，与客户端传的 `stream` 值无关。客户端要求 `stream: false` 时，auth2api 会在本地 drain 上游 SSE，再按原 wire 格式（Responses / Chat Completions / Anthropic Messages）输出单条 JSON —— 其中包括把 `response.output_item.done` 的 item 拼回 `output` 数组（因为 codex 的 `response.completed.response.output` 永远是 `[]`）。
-
-OpenAI Responses / Chat / Claude Code 客户端无需关心 codex 的特殊行为，直接用即可。
-
-#### Cursor `/v1/responses` 限制
-
-Cursor 的 chat 协议是逆向得到的：请求走 `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`，HTTP/2 + `application/connect+proto`，响应被解码后再转换回 OpenAI Responses SSE delta。Cursor 只支持流式，所以 `stream` 会被强制开启。当前仅覆盖单轮流式文本：工具调用、图片、仓库上下文、编辑动作以及 Cursor 更完整的 agent 协议暂不转换。
-
-Decoder 会把 Cursor 上游的 chain-of-thought（reasoning）字节路由到 `response.reasoning_summary_text.delta` 事件，避免污染主 `response.output_text.delta`。对于 Composer / Kimi 这种把整段（思考 + 答案）都塞进 reasoning 通道的模型，decoder 会按第一处 `</think>` 标签拆分——前面留在 reasoning，后面回到正文 `output_text`。
-
-### 接口列表
-
-| Endpoint                         | 说明                                                 |
-| -------------------------------- | ---------------------------------------------------- |
-| `POST /v1/chat/completions`      | OpenAI 兼容聊天接口                                  |
-| `POST /v1/responses`             | OpenAI Responses API 兼容接口                        |
-| `POST /v1/messages`              | Claude 原生消息透传                                  |
-| `POST /v1/messages/count_tokens` | Claude token 计数                                    |
-| `GET /v1/models`                 | 列出可用模型                                         |
-| `GET /admin/accounts`            | 查看账号健康状态（需要 API key）                     |
-| `GET /admin/stats`               | 按客户端/账号/接口三维聚合的调用统计（需要 API key） |
-| `POST /admin/reload`             | 从磁盘重新加载 token（需要 API key）                 |
-| `GET /health`                    | 健康检查                                             |
-
 ## Docker
 
-```bash
-# 构建
-docker build -t auth2api .
-
-# 运行（挂载配置文件与 token 目录）
-docker run -d \
-  -p 8317:8317 \
-  -v ~/.auth2api:/data \
-  -v ./config.yaml:/config/config.yaml \
-  auth2api
-```
-
-或者使用 docker-compose：
+构建并启动：
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
-## 与 Claude Code 配合使用
-
-将 `ANTHROPIC_BASE_URL` 指向 auth2api：
+镜像默认启动命令：
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
-claude
+node dist/index.js --config=/config/config.yaml
 ```
 
-Claude Code 使用的是原生 `/v1/messages` 接口，auth2api 会直接透传。`Authorization: Bearer` 与 `x-api-key` 两种认证头都支持。
+如果走 Docker 部署，建议在 `config.yaml` 里把 `auth-dir` 指到容器内可写目录，比如 `/data`，因为 compose 默认挂载了：
 
-## 多账号
+- `./config.yaml:/config/config.yaml`
+- 命名卷 `auth-data:/data`
 
-auth2api 支持多个 Claude OAuth 账号，每个账号的 token 作为独立文件存储在 auth 目录中。
-
-- 每执行一次 `--login` 可以添加一个账号的 token
-- 请求使用粘性选择策略 — 同一个账号会被持续使用，直到触发 cooldown
-- 当遇到限流或故障时，auth2api 会自动切换到下一个可用账号
-- 逐账号追踪 token 用量（输入、输出、缓存），并定期输出日志
-- 通过 `/admin/accounts` 可查看所有账号的状态
-
-### Codex 智能路由
-
-`codex` provider 现在在原有账号池之上叠加了一层仅对 `codex` 生效的策略路由：
-
-- 会话级 sticky 优先使用协议内天然字段,例如 `previous_response_id`、
-  `conversation_id`、`session_id`
-- 绑定账号会一直复用，直到账号 cooldown 或 sticky 过期
-- 每个账号维护一份路由 metadata，用于推断 / 记录 reset 窗口
-- 收到 `Retry-After` 时会立即校准下一次 reset 时间
-- `anthropic` / `cursor` 仍保持原来的账号池行为，不受影响
-
-## 管理状态
-
-通过 `/admin/accounts` 查看所有账号状态：
+## 开发
 
 ```bash
-curl http://127.0.0.1:8317/admin/accounts \
-  -H "Authorization: Bearer <your-api-key>"
+npm run dev
+npm run build
+npm test
 ```
 
-响应结构(每个已登录 provider 一组):
+## 说明
 
-```json
-{
-  "providers": {
-    "anthropic": { "accounts": [...], "account_count": 1 },
-    "codex":     { "accounts": [...], "account_count": 1 }
-  },
-  "generated_at": "2026-04-26T..."
-}
-```
-
-每个账号 snapshot 包含:可用状态、cooldown 截止时间、失败计数、最近刷新时间、请求统计、按账号聚合的 token 用量(其中 `totalReasoningOutputTokens` 是 reasoning 模型如 `gpt-5.5` 隐藏推理消耗的 token,不计入可见输出)。Codex 账号还会带 `planType`(从 OAuth `id_token` 提取的 `"plus"`/`"pro"`/`"free"` 等)。启用 codex 智能路由时,快照里还会额外暴露路由 metadata(`resetAt`、`lastQuotaSyncAt`、`lastActiveAt`、`confidence`、`windowType`、`resetPeriodMs`) 供排查策略路由使用。如果 refresh token 被永久作废(`refresh_token_reused`/`expired`/`invalidated`),账号会进入 24 小时终态冷却,`lastError` 中会提示需要重新执行 `--login --provider=<provider>`。
-
-### API key 管理
-
-`/admin/api-keys` 支持列表、创建、启用、禁用 4 个动作。`GET /admin/api-keys` 返回的 `id` 就是启用/禁用接口使用的标识。创建 API key 时 `name` 必须唯一；未传 `name` 时服务端会按 tier 生成唯一默认名。
-
-```bash
-curl http://127.0.0.1:8317/admin/api-keys \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys \
-  -H "Authorization: Bearer <bootstrap-admin-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"tier":"lite","name":"my-lite-key","enabled":true}'
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/enable \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/disable \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-```
-
-`admin` key 不允许直接禁用；如果要切换 active admin，先创建新的 admin key。
-
-### 在不停机的情况下重新登录
-
-服务运行中跑 `--login` 会写入新 token 文件并**自动通知运行中的服务**(POST `/admin/reload`),新 token 立刻生效,不必重启。对 codex provider 尤其重要:OpenAI 每次刷新都会轮转 refresh token,如果不重载,运行中的服务还在用旧的 refresh token,刷新会被后端识别为 `refresh_token_reused`,导致账号进入终态冷却。
-
-你也可以手动触发重载(Windows、Docker、自动化脚本场景):
-
-```bash
-curl -X POST http://127.0.0.1:8317/admin/reload \
-  -H "Authorization: Bearer <your-api-key>"
-```
-
-响应结构:
-
-```json
-{
-  "reloaded": {
-    "anthropic": { "added": [], "updated": ["alice@…"], "unchanged": [] },
-    "codex": { "added": [], "updated": [], "unchanged": ["bob@…"] }
-  },
-  "generated_at": "2026-04-26T..."
-}
-```
-
-重载语义为 **upsert**:磁盘上新出现的 token 文件会被添加到内存池;已有账号若 `access_token` 变化则替换(同时清掉 cooldown / `lastError`,但请求/用量统计保留);磁盘上消失的账号文件**不会**从内存中移除,以免误删 token 文件丢失历史统计——如确需移除,请重启服务。
-
-### 调用统计 `/admin/stats`
-
-每一个通过 API key 鉴权的 `/v1` 请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。`/admin` 管理接口不计入统计。
-
-`GET /admin/stats` 返回三个互相独立的聚合视图，默认返回当天统计。可用 `date=YYYY-MM-DD` 查询单日，也可用 `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` 查询日期区间，最长只能查询最近 7 天。
-
-- `byClient[name]` —— 按 API key 的 `name` 聚合：请求数、成功/失败、五项 token、累计延迟、最近一次 IP 与 User-Agent
-- `byAccount["<provider>:<email>"]` —— 按上游 OAuth 账号聚合
-- `byApi["<endpoint>|<model>|<provider>"]` —— 按 endpoint × model × provider 三元组聚合
-- `totals` —— 全局合计
-
-```bash
-curl http://127.0.0.1:8317/admin/stats \
-  -H "Authorization: Bearer <your-api-key>"
-
-curl "http://127.0.0.1:8317/admin/stats?start_date=2026-05-03&end_date=2026-05-09" \
-  -H "Authorization: Bearer <your-api-key>"
-```
-
-```json
-{
-  "byClient": {
-    "team-a": {
-      "name": "team-a",
-      "requests": 142, "successes": 140, "failures": 2,
-      "totalInputTokens": 12345, "totalOutputTokens": 6789,
-      "totalCacheReadInputTokens": 0, "totalLatencyMs": 286430,
-      "lastIp": "127.0.0.1", "lastUa": "claude-cli/2.1.88",
-      "firstSeenAt": "2026-05-09T08:00:00Z",
-      "lastSeenAt":  "2026-05-09T12:00:00Z"
-    }
-  },
-  "byAccount": {
-    "anthropic:alice@example.com": { "provider": "anthropic", "email": "alice@example.com", "requests": 100, ... }
-  },
-  "byApi": {
-    "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
-  },
-  "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
-  "range": { "start_date": "2026-05-09", "end_date": "2026-05-09" },
-  "generated_at": "2026-05-09T12:00:00Z"
-}
-```
-
-数据会无限追加。如果文件过大，停服后直接删除 `stats.jsonl` 即可重置；停服时会主动 flush 一次。完全不想要这个功能可以在 `config.yaml` 里写：
-
-```yaml
-stats:
-  enabled: false
-```
-
-### 网关可观测性
-
-当需要基于真实样本分析路由、缓存、慢请求或稳定性问题时，可以开启 trace 日志与每日可观测报告：
-
-```yaml
-observability:
-  enabled: true
-  trace:
-    enabled: true
-    retentionDays: 14
-  report:
-    enabled: true
-    scheduleHour: 2
-    timezone: "Asia/Shanghai"
-    recipients:
-      - "ops@example.com"
-
-mail:
-  provider: "resend"
-  resend:
-    apiKey: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    from: "auth2api Report <report@your-domain.example>"
-```
-
-trace 事件会写入 `<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`。每条事件包含 `traceId`、路由决策、缓存命中/未命中、上游尝试记录、失败类型、token 用量与分步骤延迟。每日 HTML 报告会生成在 `<auth-dir>/observability/reports/`。
-
-也可以主动触发指定日期的日报：
-
-```bash
-curl -X POST http://127.0.0.1:8317/admin/reports/daily \
-  -H "Authorization: Bearer <admin-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"date":"2026-06-17","sendEmail":true}'
-```
-
-本地分析脚本会直接读取 trace JSONL，适合从日报里的慢请求继续定位原因：
-
-```bash
-npm run obs:slow -- --date 2026-06-17 --limit 20
-npm run obs:trace -- --date 2026-06-17 --trace-id <trace-id>
-npm run obs:explain -- --date 2026-06-17 --trace-id <trace-id>
-npm run obs:report -- --date 2026-06-17 --send-email
-```
-
-建议流程是先用 `obs:slow` 找到当天最慢的 trace，再用 `obs:explain` 对单个 trace 做快速归因。归因逻辑主要参考：
-
-- `upstream_fetch_headers`：上游首包慢或上游排队耗时
-- `retry_wait` 与 `attempts[]`：429、5xx 或网络错误后的重试等待
-- `success_handler`：响应转换、流式转发或本地消费耗时
-- `routing.accountReason` 与 `cache.sessionRoute`：账号选择和会话粘滞路由
-- `cache.promptCacheReadTokens`：prompt cache 是否有效命中
-
-`--login` 端的提示信息:
-
-- `Notified running auth2api server to reload tokens.` —— 成功,服务已加载新 token。
-- `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` —— 连接被拒/超时。常见情形是当前没有服务在跑,不算错误。
-- `auth2api server is running but rejected the reload (HTTP 401/403). …restart the server to pick up the new token.` —— 可执行行动:把 bootstrap admin key 改回一致的值,或重启服务让其加载新 key。
-
-## 测试
-
-仓库内置了测试套件，使用 mocked upstream response，不会调用真实 Claude 服务：
-
-```bash
-npm run test:smoke
-```
-
-## 致谢
-
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- [sub2api](https://github.com/Wei-Shaw/sub2api)
-
-## License
-
-MIT
+- `codex` 实际转发的是你的 ChatGPT 账号会话与额度，仅建议个人自用
+- `cursor` 是逆向得到的实验性集成，上游协议或版本门禁变化时可能随时失效

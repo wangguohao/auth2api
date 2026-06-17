@@ -1,4 +1,5 @@
 import { AccountManager } from "../accounts/manager";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const MODELS_PATH = "/codex/models";
@@ -57,11 +58,15 @@ async function fetchUpstream(
 
   let resp: Response;
   try {
-    resp = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(10_000),
-    });
+    resp = await fetchWithAccountProxy(
+      url,
+      {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      },
+      account,
+    );
   } catch (err: any) {
     const cause = err?.cause;
     const detail = cause

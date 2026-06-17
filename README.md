@@ -2,35 +2,39 @@
 
 [中文](./README_CN.md)
 
-A lightweight OAuth-to-API proxy that turns your Claude (Anthropic), ChatGPT (OpenAI Codex), and experimental local Cursor login into usable API endpoints for Claude Code and OpenAI-compatible clients.
+Additional ops docs:
 
-auth2api is intentionally small and focused:
+- [VPS proxy migration runbook](./docs/vps-proxy-runbook.md)
 
-- bring your own Claude / ChatGPT / Cursor login (one or more accounts per provider)
-- one local or self-hosted proxy
-- automatic per-provider routing by model name
+`auth2api` is a lightweight OAuth-to-API proxy that turns your own upstream logins into local API endpoints.
 
-It is not trying to be a large multi-provider gateway. If you want a compact, understandable proxy that is easy to run and modify, auth2api is built for that use case.
+It currently supports:
 
-## Features
+- `anthropic`: Claude OAuth
+- `codex`: OpenAI "Sign in with ChatGPT" OAuth
+- `cursor`: experimental Cursor account integration
 
-- **Lightweight by design** — small codebase, minimal moving parts
-- **Multiple providers, one proxy** — Claude OAuth, OpenAI Codex (ChatGPT) OAuth, and an experimental Cursor local-login provider coexist; per-provider account pools, cooldown, refresh, and stats
-- **Multi-account support** — load multiple OAuth tokens per provider with sticky routing, automatic failover, and per-account usage tracking
-- **OpenAI-compatible API** — supports `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
-- **Claude native passthrough** — supports `/v1/messages` and `/v1/messages/count_tokens`
-- **Claude Code friendly** — works with both `Authorization: Bearer` and `x-api-key`
-- **Streaming, tools, images, and reasoning** — covers the main usage patterns without a large framework
-- **Structured JSON output** — supports `response_format` (Chat API) and `text.format` (Responses API) for structured outputs
-- **Per-account health handling** — cooldown, retry, token refresh (with concurrency lock), and `/admin/accounts` snapshot
-- **Basic safety defaults** — timing-safe API key validation, per-IP rate limiting, localhost-only browser CORS
+The project is intentionally small: one proxy, a few upstream providers, multi-account routing, and admin tooling for local/self-hosted use.
+
+## What It Does
+
+- Exposes OpenAI-compatible endpoints: `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`
+- Exposes Anthropic-compatible endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens`
+- Supports multiple accounts per provider with automatic account selection, failover, cooldown, refresh, and sticky routing
+- Routes requests by model family instead of forcing one upstream for everything
+- Supports API key tiers, per-key concurrency limits, and per-key 5-hour request quotas
+- Includes admin endpoints for account snapshots, routing inspection, API key management, stats, reload, and daily reports
+- Includes request tracing and observability helpers for debugging slow or failing traffic
 
 ## Requirements
 
 - Node.js 20+
-- A Claude account (Claude Max subscription recommended)
+- At least one upstream account:
+  - Claude account for `anthropic`
+  - ChatGPT Plus/Pro for `codex`
+  - Cursor desktop/browser login for `cursor` (experimental)
 
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/AmazingAng/auth2api
@@ -41,109 +45,179 @@ npm run build
 
 ## Login
 
-auth2api supports these upstream providers:
-
-- `anthropic` — Claude OAuth (default). Used for `claude-*` models.
-- `codex` — OpenAI's "Sign in with ChatGPT" OAuth, talking to the official codex backend at `https://chatgpt.com/backend-api/codex/responses`. Used for `gpt-5*` (incl. `gpt-5-codex`), `o\d*`, and `codex-*` models. Requires a **ChatGPT Plus or Pro** subscription — Free accounts authenticate but the first call fails with `model not supported`.
-- `cursor` — experimental Cursor account, authorized either through a browser deep-link PKCE flow (default) or by importing the local Cursor desktop login. **Routing**: in multi-provider setups Cursor only serves models with an explicit `cursor-*` or `cr/*` prefix. In **Cursor-exclusive mode** (only Cursor is logged in, no `anthropic`/`codex` accounts), every request — including bare `claude-*` or `gpt-*` model names — is auto-routed through Cursor so off-the-shelf Claude Code / OpenAI clients work without a prefix.
-
 Pick the provider with `--provider=`. Default is `anthropic`.
 
-### Auto mode (requires local browser)
-
 ```bash
-# Claude (default)
+# Claude OAuth
 node dist/index.js --login
 
-# Codex (ChatGPT Plus/Pro)
+# ChatGPT / Codex OAuth
 node dist/index.js --login --provider=codex
-node dist/index.js --login --provider=codex --manual --routingExtra='{"bias":1,"level":"pro"}'
 
-# Cursor (experimental; opens a browser to authorize your Cursor account)
+# ChatGPT / Codex OAuth on a remote machine
+node dist/index.js --login --provider=codex --manual
+
+# Cursor browser login (experimental)
 node dist/index.js --login --provider=cursor
 
-# Cursor — fall back to importing the local Cursor desktop login instead of using the browser
+# Import existing local Cursor desktop login
 node dist/index.js --login --provider=cursor --cursor-import-local
 node dist/index.js --login --provider=cursor --cursor-storage=/path/to/state.vscdb
 ```
 
-Anthropic and Codex open a browser URL. After authorizing, the callback is handled automatically. The Anthropic flow uses port `54545`; the Codex flow uses port `1455` — make sure neither is blocked by your firewall. Cursor uses a different "deep-link" PKCE flow: it prints a `https://cursor.com/loginDeepControl?...` URL, you click "Yes, Log In" in your browser, and `auth2api` polls `api2.cursor.sh/auth/poll` until the token is issued — no callback port required. Pass `--cursor-import-local` (or `--cursor-storage=...`) if you'd rather pull the existing token out of your Cursor desktop install.
+Notes:
 
-`--routingExtra` is persisted with the token and hot-reloaded on `POST /admin/reload`. Supported fields are `bias` and `level` (`lite` or `pro`); `routing.level` defaults to `lite` when omitted. For codex routing, `routing.bias` is added to the smart-routing score; use it when you need a specific account to stay top priority.
+- Anthropic and Codex support browser callback login. `--manual` is useful on remote servers.
+- Cursor uses a different browser deep-link flow or local token import.
+- Running `--login` multiple times adds more accounts to the same provider pool.
+- Successful login triggers `POST /admin/reload` automatically if the server is already running.
 
-### Manual mode (for remote servers)
+### `--routingExtra`
+
+You can persist per-account routing hints during login:
 
 ```bash
-node dist/index.js --login --manual
-node dist/index.js --login --provider=codex --manual
+node dist/index.js --login --provider=codex --routingExtra='{"bias":1,"level":"pro"}'
+node dist/index.js --login --provider=codex --routingExtra='{"bias":1,"level":"pro","proxy":"http://127.0.0.1:7890"}'
 ```
 
-Open the printed URL in your browser. After authorizing, your browser will redirect to a `localhost` URL that fails to load — copy the full URL from the address bar and paste it back into the terminal.
+Supported fields:
 
-You can run `--login` multiple times to add additional accounts (per provider). auth2api stores tokens side-by-side in `auth-dir` (`claude-<email>.json`, `codex-<email>.json`, and `cursor-<email>.json`) and routes inbound requests to the matching pool by model name. Logging in to only one provider is fine — the others simply have no advertised models.
+- `bias`: adjusts account-selection priority
+- `level`: `lite` or `pro`
+- `proxy`: per-account HTTP(S) proxy URL, for example `http://127.0.0.1:7890`
 
-> **Note on Codex:** The codex provider relays your ChatGPT Plus/Pro subscription quota. OpenAI's ToS does not officially permit relaying ChatGPT sessions through third-party tools — use this for your own personal local consumption only.
+These values are stored with the token file and are reloaded by `POST /admin/reload`.
 
-> **Note on Cursor:** The cursor provider is a research-only integration built from non-public, reverse-engineered Cursor APIs (`api2.cursor.sh` over HTTP/2, Connect-RPC + protobuf). It may break when Cursor changes client versions, may violate Cursor's terms, and should be used only for local personal experiments.
+Notes:
 
-## Starting the server
+- `proxy` currently uses a standard HTTP(S) proxy endpoint, which maps cleanly to Clash's `http-port` or `mixed-port`
+- Selecting a specific Clash node in the UI does **not** give you a node-specific URL to paste into auth2api; in practice you usually point auth2api at Clash's local proxy endpoint such as `http://127.0.0.1:7890`
+- If you need one auth2api account to stay on one egress route, that isolation has to be enforced on the Clash side; if multiple accounts share the same Clash port and you only flip the global Selector, they will all move together
+- Cursor's main chat path still uses a custom direct HTTP/2 transport; `routingExtra.proxy` already covers most fetch-based flows (Anthropic/Codex upstream, refresh, models/usage), but **not yet** the primary Cursor chat stream
+
+## Start The Server
 
 ```bash
 node dist/index.js
 ```
 
-The server starts on `http://127.0.0.1:8317` by default. On first run, a bootstrap admin key is auto-generated and saved to `config.yaml`. Client and admin API keys live in `<auth-dir>/api-keys.json` and are managed via `/admin/api-keys`.
+Default address:
+
+- `http://127.0.0.1:8317`
+
+On first start, a bootstrap admin key is generated automatically and written to `config.yaml` if `bootstrap-admin-key` is empty.
+
+## Routing Rules
+
+Provider routing is model-driven:
+
+- `cursor-*` and `cr/*` always go to `cursor`
+- `gpt-5*`, `o*`, and `codex-*` go to `codex`
+- `claude-*` and Anthropic aliases go to `anthropic`
+- unknown models fall back to `anthropic`
+
+### Cursor-exclusive mode
+
+If `cursor` is the only provider with logged-in accounts, all model names are routed to Cursor automatically, including plain `claude-*` or `gpt-*` names. This makes Cursor-only deployments usable with off-the-shelf Anthropic/OpenAI clients without adding a `cursor-` prefix.
+
+### `/v1/models`
+
+`GET /v1/models` only lists models for providers that currently have accounts loaded.
+
+Do not hardcode the README model table as the source of truth:
+
+- Codex model availability is account-dependent and fetched dynamically
+- Cursor model availability may come from its internal model list, with fallbacks when unavailable
+- Anthropic/Cursor aliases and translation behavior evolve over time
+
+## API Compatibility
+
+### OpenAI-compatible endpoints
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `GET /v1/models`
+
+### Anthropic-compatible endpoints
+
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+
+### Provider support matrix
+
+| Endpoint | anthropic | codex | cursor |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | Yes | Yes | Yes |
+| `POST /v1/responses` | Yes | Yes | Yes |
+| `POST /v1/messages` | Yes | Yes | Yes |
+| `POST /v1/messages/count_tokens` | Yes | `501` | `501` |
+
+Implementation notes:
+
+- `codex` is normalized through the internal Responses translator so Chat, Responses, and Anthropic-style requests can all share the upstream Codex backend.
+- `cursor` only supports streaming upstream; non-stream clients are aggregated locally where needed.
+- Cursor-backed `POST /v1/messages` is re-encoded as Anthropic Messages SSE for Claude Code compatibility.
 
 ## Configuration
 
-Copy `config.example.yaml` to `config.yaml` and edit as needed:
+Copy `config.example.yaml` to `config.yaml` and adjust it:
 
 ```yaml
-host: "" # bind address, empty = 127.0.0.1
+host: ""
 port: 8317
 
-auth-dir: "~/.auth2api" # where OAuth tokens are stored
-
-bootstrap-admin-key: "sk-bootstrap-admin" # initial admin key; generated on first start if omitted
+auth-dir: "~/.auth2api"
+bootstrap-admin-key: "sk-bootstrap-admin"
 
 api-key-tier-limits:
   lite:
-    concurrency: 5 # default tier
-    max-requests-5h: 300 # 5-hour window for lite
+    concurrency: 5
+    max-requests-5h: 300
   pro:
-    concurrencyMultiplier: 2 # pro = lite * 2
+    concurrencyMultiplier: 2
     max-requests-multiplier: 2
   admin:
-    concurrencyMultiplier: 2 # admin = lite * 2
+    concurrencyMultiplier: 2
     max-requests-multiplier: 2
 
-body-limit: "200mb" # maximum JSON request body size, useful for large-context usage
+body-limit: "200mb"
 
 timeouts:
-  messages-ms: 120000 # non-stream /v1/messages timeout
-  stream-messages-ms: 600000 # stream /v1/messages timeout (10 min, suitable for Claude Code)
-  count-tokens-ms: 30000 # /v1/messages/count_tokens timeout
+  messages-ms: 120000
+  stream-messages-ms: 600000
+  count-tokens-ms: 30000
 
-# Request fingerprinting — controls how auth2api mimics Claude Code CLI
+stats:
+  enabled: true
+
+observability:
+  enabled: false
+  trace:
+    enabled: true
+    retentionDays: 14
+  report:
+    enabled: false
+    scheduleHour: 2
+    timezone: "Asia/Shanghai"
+    retentionDays: 14
+    recipients:
+      - "ops@example.com"
+
+mail:
+  provider: "resend"
+  resend:
+    apiKey: "re_xxx"
+    from: "auth2api Report <report@example.com>"
+
+debug: "off"
+
 cloaking:
-  cli-version: "2.1.88" # CLI version to impersonate
-  entrypoint: "cli" # billing attribution entrypoint (cli, mcp, sdk, etc.)
-
-debug: "off" # off | errors | verbose
-```
-
-`debug` supports three levels:
-
-- `off`: no extra logs
-- `errors`: log upstream/network failures and upstream error bodies
-- `verbose`: include `errors` logs plus per-request method, path, status, and duration
-
-`api-key-tier-limits` controls request concurrency and the 5-hour request cap by API key tier. `lite` is the base tier, `pro` and `admin` are derived from `lite` by multiplier and can be tuned independently. The current server applies these limits per authenticated key and returns HTTP `429` plus `Retry-After` when a tier is exhausted. `api-key-rate-limit` remains only for legacy config compatibility.
-
-Cursor's reverse-engineered headers can be overridden if the upstream version gate changes. `agent-base-url` is the legacy alias for the chat host; both keys point at the same backend now (`api2.cursor.sh`).
-
-```yaml
-cloaking:
+  cli-version: "2.1.88"
+  entrypoint: "cli"
+  codex:
+    originator: "codex_cli_rs"
+    cli-version: "0.125.0"
   cursor:
     client-version: "2.3.41"
     client-type: "ide"
@@ -151,363 +225,130 @@ cloaking:
     api-base-url: "https://api2.cursor.sh"
 ```
 
-## Usage
+Important config areas:
 
-Use any OpenAI-compatible client pointed at `http://127.0.0.1:8317`:
+- `auth-dir`: token, API key, stats, and observability storage
+- `api-key-tier-limits`: per-tier concurrency and quota limits
+- `stats.enabled`: enables request statistics persisted in `stats.jsonl`
+- `observability.*`: enables trace collection and daily HTML reports
+- `mail.*`: used by scheduled or manual daily report delivery
+- `cloaking.*`: upstream request fingerprint/version settings
+- `debug`: `off`, `errors`, or `verbose`
+
+## Authentication And API Keys
+
+All `/v1/*` endpoints require an API key.
+
+Supported auth headers:
+
+- `Authorization: Bearer <key>`
+- `x-api-key: <key>`
+
+Admin endpoints require an enabled `admin` tier key.
+
+API keys are stored in:
+
+- `<auth-dir>/api-keys.json`
+
+## Admin Endpoints
+
+All `/admin/*` routes require an admin API key.
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /admin/accounts` | account snapshot by provider |
+| `POST /admin/accounts/usage/refresh` | refresh usage for all or selected accounts |
+| `GET /admin/accounts/decision` | inspect provider/account routing decisions |
+| `GET /admin/stats` | aggregated request stats |
+| `GET /admin/api-keys` | list API keys |
+| `POST /admin/api-keys` | create API key |
+| `POST /admin/api-keys/:id/enable` | enable API key |
+| `POST /admin/api-keys/:id/disable` | disable API key |
+| `POST /admin/reload` | reload tokens and API keys from disk |
+| `POST /admin/reports/daily` | generate daily HTML report and optionally send email |
+
+### Stats query behavior
+
+`GET /admin/stats` supports:
+
+- `date=YYYY-MM-DD`
+- or `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+- optional `locale=zh-CN`
+
+Limits:
+
+- date range must stay within the last 7 days
+- maximum span is 7 days
+
+## Observability And Debugging
+
+When observability is enabled:
+
+- traces are written to `<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`
+- daily reports are written to `<auth-dir>/observability/reports/daily-YYYY-MM-DD.html`
+
+Helper scripts:
+
+```bash
+npm run obs:slow -- --date YYYY-MM-DD --limit 20
+npm run obs:trace -- --date YYYY-MM-DD --trace-id <trace-id>
+npm run obs:explain -- --date YYYY-MM-DD --trace-id <trace-id>
+npm run obs:report -- --date YYYY-MM-DD [--send-email]
+
+npm run auth:error-summary -- --date YYYY-MM-DD
+npm run auth:error-trace -- --date YYYY-MM-DD
+```
+
+These scripts help inspect:
+
+- slow requests
+- a single trace event
+- heuristic latency explanations
+- manual daily report generation
+- repeated auth/refresh failures
+
+## Example Request
 
 ```bash
 curl http://127.0.0.1:8317/v1/chat/completions \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 1024
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      { "role": "user", "content": "Hello" }
+    ]
   }'
 ```
 
-### Available models
-
-`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The current ChatGPT-account-supported set at the time of writing:
-
-| Model ID                                             | Provider  | Description                                        |
-| ---------------------------------------------------- | --------- | -------------------------------------------------- |
-| `claude-opus-4-7`                                    | anthropic | Claude Opus 4.7                                    |
-| `claude-opus-4-6`                                    | anthropic | Claude Opus 4.6                                    |
-| `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                                  |
-| `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                                   |
-| `claude-haiku-4-5`                                   | anthropic | Alias for Claude Haiku 4.5                         |
-| `gpt-5.5`                                            | codex     | GPT-5.5 (reasoning model)                          |
-| `gpt-5.4`                                            | codex     | GPT-5.4                                            |
-| `gpt-5.4-mini`                                       | codex     | GPT-5.4 Mini                                       |
-| `gpt-5.3-codex`                                      | codex     | GPT-5.3 (Codex variant)                            |
-| `gpt-5.2`                                            | codex     | GPT-5.2                                            |
-| `cursor-claude-opus-4-7-medium`                      | cursor    | Claude Opus 4.7 routed through Cursor              |
-| `cursor-claude-sonnet-4-7-medium`                    | cursor    | Claude Sonnet 4.7 routed through Cursor            |
-| `cursor-default`                                     | cursor    | Cursor "Auto" model                                |
-| `cursor-premium` / `cursor-fast` / `cursor-composer` | cursor    | Fallback ids when AvailableModels can't be reached |
-
-Short convenience aliases accepted by auth2api:
-
-- `opus` -> `claude-opus-4-7`
-- `sonnet` -> `claude-sonnet-4-6`
-- `haiku` -> `claude-haiku-4-5-20251001`
-
-Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account; `cursor-*` and `cr/*` hit your Cursor account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
-
-#### "Cursor exclusive" mode (zero-config Claude Code / OpenAI clients)
-
-When **only Cursor has a logged-in account** (anthropic and codex are both empty), every model name routes to Cursor automatically — `cursor-` prefix becomes optional. This is what makes a Cursor-only auth2api a drop-in replacement for the Anthropic API or the OpenAI API:
-
-| Client behaviour                                           | What auth2api does                                                                 |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `POST /v1/messages` `{"model":"claude-sonnet-4-5"}`        | routes through Cursor and re-encodes the upstream stream as Anthropic Messages SSE |
-| `POST /v1/messages` `{"model":"opus"}`                     | maps `opus` → `claude-opus-4-7-medium` on Cursor, returns Anthropic Messages SSE   |
-| `POST /v1/responses` `{"model":"gpt-5.5"}`                 | maps to `gpt-5.5-medium` on Cursor, returns OpenAI Responses SSE                   |
-| `POST /v1/chat/completions` `{"model":"claude-haiku-4-5"}` | maps to `claude-4.5-haiku` on Cursor                                               |
-
-A small built-in alias table covers the names Anthropic / OpenAI SDKs and Claude Code use by default (`claude-sonnet-4-5`, `claude-opus-4-7`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `o3`, …) and translates them to Cursor's internal SKUs (`claude-4.5-sonnet`, `claude-opus-4-7-medium`, `gpt-5.5-medium`, …). Set `CURSOR_MODEL_ALIASES="my-name=claude-opus-4-7-max,foo=composer-2"` to extend the table without forking. Anything not in the table is passed through verbatim, so you can still hit Cursor's full SKU catalogue (e.g. `claude-opus-4-7-thinking-max`).
-
-When **more than one provider has accounts**, the historical routing table above applies — explicit prefixes (`cursor-`, `cr/`) still force Cursor, but `claude-*` goes to your Anthropic OAuth account.
-
-##### Anthropic SSE for Claude Code on Cursor
-
-`POST /v1/messages` against a Cursor-served model emits the Anthropic Messages SSE format (`message_start` → `content_block_start`/`content_block_delta` → `message_delta` → `message_stop`). Reasoning bytes from thinking-enabled models are routed to a `thinking` content block before the final `text` block, matching Claude Code's expectations. Streaming is forced on (Cursor only supports streaming), so non-streaming `/v1/messages` requests still get an SSE response when the upstream is Cursor.
-
-### Endpoint × provider support matrix
-
-| Endpoint                         | anthropic | codex                                                               | cursor                                                             |
-| -------------------------------- | --------- | ------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `POST /v1/chat/completions`      | ✅        | ✅ (Chat ↔ Responses translator — reasoning as `reasoning_content`) | ✅ (`chat.completion.chunk` SSE; reasoning as `reasoning_content`) |
-| `POST /v1/responses`             | ✅        | ✅ (passthrough)                                                    | ✅                                                                 |
-| `POST /v1/messages`              | ✅        | ✅ (Anthropic ↔ Responses translator — see below)                   | ✅ (Anthropic Messages SSE — see below)                            |
-| `POST /v1/messages/count_tokens` | ✅        | ❌ (501)                                                            | ❌ (501)                                                           |
-
-For Cursor all three OpenAI-compatible endpoints are wired natively: `req.path` selects the wire format the cursor provider emits (`openai-chat-completions`, `openai-responses`, or `anthropic-messages`). Non-streaming `/v1/chat/completions` aggregates the upstream stream into a single `chat.completion` JSON response.
-
-For Codex (ChatGPT-account backend) the same coverage is achieved through a dedicated Chat ↔ Responses ↔ Anthropic translator pair (`src/upstream/responses-translator.ts`): incoming Chat or Anthropic requests are translated to OpenAI Responses upstream, the streaming Responses SSE response is translated back to the original wire format, and non-streaming requests aggregate the SSE locally before responding. Tool calls, system prompts (lifted into `instructions`), `reasoning_effort`/`thinking`, multi-turn conversations and `response_format` `json_schema` are all supported. Codex-specific incompatibilities (`max_output_tokens`, `parallel_tool_calls`) are stripped automatically in the codex handler — you don't have to think about them.
-
-#### Codex `/v1/responses` body requirements
-
-The ChatGPT codex backend rejects requests that don't include `stream: true`, `store: false`, and `instructions`, and 400s on a couple of public Responses fields (`max_output_tokens`, `parallel_tool_calls`). auth2api applies the same sanitize-and-force-stream pattern to all three codex endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`):
-
-- `store: false` and `instructions: ""` are auto-filled when the client omits them.
-- `max_output_tokens` and `parallel_tool_calls` are stripped — the backend caps tokens by your ChatGPT plan instead.
-- The upstream call is **always** made with `stream: true` regardless of the client's `stream` value. If the client asked for `stream: false`, auth2api drains the upstream SSE locally and returns a single JSON body in the requested wire format (Responses, Chat Completions, or Anthropic Messages) — including stitching `response.output_item.done` items into `output` because codex's `response.completed.response.output` is always `[]`.
-
-Off-the-shelf OpenAI Responses / Chat / Claude Code clients all just work without knowing about codex's quirks.
-
-#### Cursor `/v1/responses` limitations
-
-Cursor's chat protocol is reverse-engineered: requests go to `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools` over HTTP/2 + `application/connect+proto`, and the response is decoded back into OpenAI Responses SSE deltas. Stream is forced on (Cursor only supports streaming). Tool calls, images, repository context, edit actions, and Cursor's richer agent protocol are intentionally not translated yet — only single-turn streaming text is supported.
-
-The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.reasoning_summary_text.delta` events instead of leaking them into the main `response.output_text.delta` stream. For Composer/Kimi-style models that stream the entire response (CoT + answer) through a single reasoning channel, the decoder splits on the first `</think>` marker so the final answer still surfaces as plain `output_text`.
-
-### Endpoints
-
-| Endpoint                         | Description                                                           |
-| -------------------------------- | --------------------------------------------------------------------- |
-| `POST /v1/chat/completions`      | OpenAI-compatible chat                                                |
-| `POST /v1/responses`             | OpenAI Responses API compatibility                                    |
-| `POST /v1/messages`              | Claude native passthrough                                             |
-| `POST /v1/messages/count_tokens` | Claude token counting                                                 |
-| `GET /v1/models`                 | List available models                                                 |
-| `GET /admin/accounts`            | Account health/status (API key required)                              |
-| `GET /admin/stats`               | Per-client / per-account / per-API call statistics (API key required) |
-| `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
-| `GET /health`                    | Health check                                                          |
-
 ## Docker
 
-```bash
-# Build
-docker build -t auth2api .
-
-# Run (mount your config and token directory)
-docker run -d \
-  -p 8317:8317 \
-  -v ~/.auth2api:/data \
-  -v ./config.yaml:/config/config.yaml \
-  auth2api
-```
-
-Or with docker-compose:
+Build and run:
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
-## Use with Claude Code
-
-Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api:
+The included image starts with:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
-claude
+node dist/index.js --config=/config/config.yaml
 ```
 
-Claude Code uses the native `/v1/messages` endpoint which auth2api passes through directly. Both `Authorization: Bearer` and `x-api-key` authentication headers are supported.
+If you use Docker, make sure `config.yaml` points `auth-dir` to a writable container path such as `/data`, because the compose file mounts:
 
-## Multi-account
+- `./config.yaml:/config/config.yaml`
+- volume `auth-data:/data`
 
-auth2api supports multiple Claude OAuth accounts. Each account is stored as a separate token file in the auth directory.
-
-- Run `--login` once per account to add tokens
-- Requests are routed using sticky selection — the same account is reused until it hits a cooldown
-- On rate limit or failure, auth2api automatically fails over to the next available account
-- Per-account token usage (input, output, cache) is tracked and logged periodically
-- Use `/admin/accounts` to inspect all account states
-
-### Codex smart routing
-
-The `codex` provider now has a provider-local smart router layered on top of the
-existing account pool:
-
-- Session-level sticky routing prefers protocol-native conversation keys such as
-  `previous_response_id`, `conversation_id`, `session_id`
-- Sticky bindings stay in place until the bound account cools down or expires
-- Per-account routing metadata tracks inferred / observed reset windows
-- `Retry-After` responses immediately calibrate the next reset window
-- Only `codex` uses this logic; `anthropic` / `cursor` keep the original pool behaviour
-
-## Admin status
-
-Use `/admin/accounts` with your configured API key to inspect the current account states:
+## Development
 
 ```bash
-curl http://127.0.0.1:8317/admin/accounts \
-  -H "Authorization: Bearer <your-api-key>"
+npm run dev
+npm run build
+npm test
 ```
 
-Response shape (one entry per logged-in provider):
+## Notes
 
-```json
-{
-  "providers": {
-    "anthropic": { "accounts": [...], "account_count": 1 },
-    "codex":     { "accounts": [...], "account_count": 1 }
-  },
-  "generated_at": "2026-04-26T..."
-}
-```
-
-Each account snapshot carries availability, cooldown, failure counters, last refresh time, request statistics, and per-account token usage including `totalReasoningOutputTokens` (reasoning models like `gpt-5.5` consume hidden reasoning tokens that aren't part of the visible output). Codex accounts also carry `planType` (e.g. `"plus"` / `"pro"` / `"free"`) extracted from the OAuth `id_token`. When codex smart routing is enabled, snapshots also expose routing metadata (`resetAt`, `lastQuotaSyncAt`, `lastActiveAt`, `confidence`, `windowType`, `resetPeriodMs`) used for provider-local strategy routing. If a refresh token was permanently invalidated (`refresh_token_reused`/`expired`/`invalidated`), the account enters a 24-hour terminal cooldown with `lastError` set to a message pointing at `--login --provider=<provider>` for re-authorization.
-
-### API key management
-
-`/admin/api-keys` supports list, create, enable, and disable operations. The `id` field returned by `GET /admin/api-keys` is the identifier used by the enable/disable actions. API key `name` values must be unique when creating keys; if omitted, the server generates a unique default from the tier.
-
-```bash
-curl http://127.0.0.1:8317/admin/api-keys \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys \
-  -H "Authorization: Bearer <bootstrap-admin-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"tier":"lite","name":"my-lite-key","enabled":true}'
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/enable \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-
-curl -X POST http://127.0.0.1:8317/admin/api-keys/<id>/disable \
-  -H "Authorization: Bearer <bootstrap-admin-key>"
-```
-
-`admin` keys cannot be disabled; create a different admin key first if you need to rotate the active one.
-
-### Re-authenticating without restart
-
-Running `--login` while the server is up writes a new token file and **automatically notifies the running server** (via `POST /admin/reload`) so the new token takes effect immediately — no restart needed. This is especially important for the codex provider: OpenAI rotates the refresh token on every refresh, so leaving the server running with a stale refresh token while you re-auth would otherwise put the account into a `refresh_token_reused` terminal cooldown.
-
-You can also trigger a reload manually (e.g. on Windows, in containers, or after a `kill -USR1` workflow) by posting to the endpoint:
-
-```bash
-curl -X POST http://127.0.0.1:8317/admin/reload \
-  -H "Authorization: Bearer <your-api-key>"
-```
-
-Response shape:
-
-```json
-{
-  "reloaded": {
-    "anthropic": { "added": [], "updated": ["alice@…"], "unchanged": [] },
-    "codex": { "added": [], "updated": [], "unchanged": ["bob@…"] }
-  },
-  "generated_at": "2026-04-26T..."
-}
-```
-
-Reload semantics are **upsert only**: new token files on disk are added to the in-memory pool, existing accounts whose `access_token` changed are updated (and any cooldown / `lastError` is cleared, but request/usage stats are preserved), and accounts that no longer exist on disk are kept in memory until the next restart (so historical stats aren't dropped if a token file is accidentally removed).
-
-### Call statistics: `/admin/stats`
-
-Every `/v1` request that passes API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts. `/admin` management endpoints are not counted.
-
-`GET /admin/stats` returns three independent aggregate views plus a global `totals`. By default it returns today's stats. Use `date=YYYY-MM-DD` for a single day, or `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` for a date range. The maximum range is the most recent 7 days.
-
-- `byClient[name]` — keyed by API key `name`; tracks requests, success / failure counts, the five token counters, total latency, and the last seen IP / User-Agent.
-- `byAccount["<provider>:<email>"]` — keyed by upstream OAuth account.
-- `byApi["<endpoint>|<model>|<provider>"]` — keyed by endpoint × model × provider.
-
-```bash
-curl http://127.0.0.1:8317/admin/stats \
-  -H "Authorization: Bearer <your-api-key>"
-
-curl "http://127.0.0.1:8317/admin/stats?start_date=2026-05-03&end_date=2026-05-09" \
-  -H "Authorization: Bearer <your-api-key>"
-```
-
-```json
-{
-  "byClient": {
-    "team-a": {
-      "name": "team-a",
-      "requests": 142, "successes": 140, "failures": 2,
-      "totalInputTokens": 12345, "totalOutputTokens": 6789,
-      "totalCacheReadInputTokens": 0, "totalLatencyMs": 286430,
-      "lastIp": "127.0.0.1", "lastUa": "claude-cli/2.1.88",
-      "firstSeenAt": "2026-05-09T08:00:00Z",
-      "lastSeenAt":  "2026-05-09T12:00:00Z"
-    }
-  },
-  "byAccount": {
-    "anthropic:alice@example.com": { "provider": "anthropic", "email": "alice@example.com", "requests": 100, ... }
-  },
-  "byApi": {
-    "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
-  },
-  "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
-  "range": { "start_date": "2026-05-09", "end_date": "2026-05-09" },
-  "generated_at": "2026-05-09T12:00:00Z"
-}
-```
-
-The JSONL grows append-only; if it gets too large just stop the server and delete `stats.jsonl` to reset (the aggregate is flushed on shutdown). To disable stats entirely:
-
-```yaml
-stats:
-  enabled: false
-```
-
-### Gateway observability
-
-Enable trace logging and daily reports when you need to diagnose routing,
-cache, or latency issues from real samples:
-
-```yaml
-observability:
-  enabled: true
-  trace:
-    enabled: true
-    retentionDays: 14
-  report:
-    enabled: true
-    scheduleHour: 2
-    timezone: "Asia/Shanghai"
-    recipients:
-      - "ops@example.com"
-
-mail:
-  provider: "resend"
-  resend:
-    apiKey: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    from: "auth2api Report <report@your-domain.example>"
-```
-
-Trace events are written to
-`<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`. Each event contains
-`traceId`, routing decisions, cache hit/miss, upstream attempts, failure kind,
-usage, and per-step latency. Daily reports are generated as HTML under
-`<auth-dir>/observability/reports/`.
-
-You can also trigger a report manually:
-
-```bash
-curl -X POST http://127.0.0.1:8317/admin/reports/daily \
-  -H "Authorization: Bearer <admin-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"date":"2026-06-17","sendEmail":true}'
-```
-
-Local analysis helpers read the trace JSONL directly:
-
-```bash
-npm run obs:slow -- --date 2026-06-17 --limit 20
-npm run obs:trace -- --date 2026-06-17 --trace-id <trace-id>
-npm run obs:explain -- --date 2026-06-17 --trace-id <trace-id>
-npm run obs:report -- --date 2026-06-17 --send-email
-```
-
-Use `obs:slow` to find slow traces from a daily report, then `obs:explain` to
-classify the likely cause. The explainer looks at:
-
-- `upstream_fetch_headers` — upstream first-byte / queueing latency
-- `retry_wait` and `attempts[]` — retry backoff after 429 / 5xx / network errors
-- `success_handler` — response transform, stream forwarding, or local drain time
-- `routing.accountReason` and `cache.sessionRoute` — sticky/session routing
-- `cache.promptCacheReadTokens` — prompt cache effectiveness
-
-Failure modes of the auto-notify (printed by `--login`):
-
-- `Notified running auth2api server to reload tokens.` — success, server picked up the new token.
-- `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` — connection refused / timeout. Common case when no server is running; not an error.
-- `auth2api server is running but rejected the reload (HTTP 401/403). The bootstrap admin key in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
-
-## Tests
-
-A test suite is included using mocked upstream responses (no real Claude service calls):
-
-```bash
-npm run test:smoke
-```
-
-## Inspired by
-
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- [sub2api](https://github.com/Wei-Shaw/sub2api)
-
-## License
-
-MIT
+- `codex` relays your ChatGPT account session and quota; use it only for your own account and at your own risk.
+- `cursor` support is reverse-engineered and experimental; upstream protocol or version-gating changes may break it at any time.

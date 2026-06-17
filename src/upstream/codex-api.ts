@@ -2,6 +2,7 @@ import { Request } from "express";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const RESPONSES_PATH = "/codex/responses";
@@ -108,12 +109,16 @@ export async function callCodexResponses(
     : config.timeouts["messages-ms"];
 
   try {
-    return await fetch(url, {
-      method: "POST",
-      headers: buildHeaders(account, stream, config),
-      body: JSON.stringify(body),
-      signal: withTimeoutSignal(timeoutMs, options.signal),
-    });
+    return await fetchWithAccountProxy(
+      url,
+      {
+        method: "POST",
+        headers: buildHeaders(account, stream, config),
+        body: JSON.stringify(body),
+        signal: withTimeoutSignal(timeoutMs, options.signal),
+      },
+      account,
+    );
   } catch (err: any) {
     // undici's "fetch failed" hides the real cause — surface it.
     const cause = err?.cause;

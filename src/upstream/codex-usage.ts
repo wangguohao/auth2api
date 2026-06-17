@@ -4,6 +4,7 @@ import {
   AccountUsageSnapshot,
 } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_TIMEOUT_MS = 10_000;
@@ -93,11 +94,15 @@ export async function fetchCodexUsage(
 
   let resp: Response;
   try {
-    resp = await fetch(CODEX_USAGE_URL, {
-      method: "GET",
-      headers,
-      signal: withTimeoutSignal(CODEX_USAGE_TIMEOUT_MS),
-    });
+    resp = await fetchWithAccountProxy(
+      CODEX_USAGE_URL,
+      {
+        method: "GET",
+        headers,
+        signal: withTimeoutSignal(CODEX_USAGE_TIMEOUT_MS),
+      },
+      token,
+    );
   } catch (err: any) {
     throw new Error(
       `codex usage fetch failed: ${err?.message || String(err)}`,

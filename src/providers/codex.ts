@@ -24,8 +24,8 @@ const MODEL_RE = /^(gpt-5(\.|-)|gpt-5$|o\d|codex-)/i;
 export function buildCodexProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {
     provider: "codex",
-    refresh: async (rt: string): Promise<TokenData> => {
-      const token = await refreshCodexTokensWithRetry(rt);
+    refresh: async (tokenData: TokenData): Promise<TokenData> => {
+      const token = await refreshCodexTokensWithRetry(tokenData);
       return { ...token, provider: "codex" };
     },
     usageRefresh: fetchCodexUsage,

@@ -1,5 +1,6 @@
 import { PKCECodes, TokenData } from "./types";
 import { timeout } from "../utils/common";
+import { fetchWithAccountProxy } from "../utils/account-proxy";
 import {
   RefreshTokenExhaustedError,
   detectExhaustedReason,
@@ -70,16 +71,21 @@ export async function exchangeCodeForTokens(
   };
 }
 
-export async function refreshTokens(refreshToken: string): Promise<TokenData> {
-  const resp = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: CLIENT_ID,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
+/** 使用账号自身代理刷新 Anthropic token，避免多账号共用出口 IP。 */
+export async function refreshTokens(token: TokenData): Promise<TokenData> {
+  const resp = await fetchWithAccountProxy(
+    TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: token.refreshToken,
+      }),
+    },
+    token,
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -103,12 +109,12 @@ export async function refreshTokens(refreshToken: string): Promise<TokenData> {
 }
 
 export async function refreshTokensWithRetry(
-  refreshToken: string,
+  token: TokenData,
   maxRetries = 3,
 ): Promise<TokenData> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await refreshTokens(refreshToken);
+      return await refreshTokens(token);
     } catch (err) {
       // Refresh token revoked/expired/reused — do not retry.
       if (err instanceof RefreshTokenExhaustedError) throw err;

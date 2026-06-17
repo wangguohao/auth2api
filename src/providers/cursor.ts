@@ -18,11 +18,12 @@ const MODEL_RE = /^(cursor[-/:]|cr\/)/i;
 export function buildCursorProvider(authDir: string): Provider {
   const manager = new AccountManager(authDir, {
     provider: "cursor",
-    refresh: async (rt: string): Promise<TokenData> => {
+    refresh: async (tokenData: TokenData): Promise<TokenData> => {
       const previous =
-        loadAllTokens(authDir, "cursor").find((t) => t.refreshToken === rt) ||
-        {};
-      const token = await refreshCursorTokensWithRetry(rt, previous);
+        loadAllTokens(authDir, "cursor").find(
+          (t) => t.refreshToken === tokenData.refreshToken,
+        ) || tokenData;
+      const token = await refreshCursorTokensWithRetry(previous);
       return { ...previous, ...token, provider: "cursor" };
     },
   });

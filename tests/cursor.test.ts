@@ -310,7 +310,8 @@ test("cursor refresh uses documented api2 token endpoint", async (t) => {
   });
   t.after(restoreFetch);
 
-  const token = await refreshCursorTokens("refresh", {
+  const token = await refreshCursorTokens({
+    refreshToken: "refresh",
     email: "cursor@example.com",
     accountUuid: "machine-id",
     cursorServiceMachineId: "machine-id",
