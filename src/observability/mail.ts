@@ -8,6 +8,12 @@ export interface MailBody {
   html?: string;
 }
 
+export type MailSender = (
+  subject: string,
+  body: MailBody,
+  recipients: string[],
+) => Promise<void>;
+
 function base64(value: string): string {
   return Buffer.from(value, "utf-8").toString("base64");
 }
@@ -136,7 +142,7 @@ class SmtpSession {
   }
 }
 
-function connect(config: Required<MailConfig>["smtp"]): Promise<Socket> {
+function connect(config: NonNullable<MailConfig["smtp"]>): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = config.secure
       ? tls.connect(config.port, config.host, { servername: config.host })
@@ -153,11 +159,49 @@ function connect(config: Required<MailConfig>["smtp"]): Promise<Socket> {
   });
 }
 
-export function createMailSender(
-  config: MailConfig,
-):
-  | ((subject: string, body: MailBody, recipients: string[]) => Promise<void>)
-  | undefined {
+export function createMailSender(config: MailConfig): MailSender | undefined {
+  if (config.provider === "resend" || config.resend) {
+    return createResendSender(config);
+  }
+  return createSmtpSender(config);
+}
+
+function createResendSender(config: MailConfig): MailSender | undefined {
+  const resend = config.resend;
+  if (!resend?.apiKey || !resend.from) return undefined;
+
+  return async (subject, body, recipients) => {
+    if (recipients.length === 0) return;
+    const endpoint = resend.endpoint || "https://api.resend.com/emails";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resend.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: resend.from,
+        to: recipients,
+        subject,
+        text: body.text,
+        html: body.html,
+      }),
+    });
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = await response.text();
+      } catch {
+        // ignore
+      }
+      throw new Error(
+        `Resend email failed: ${response.status}${detail ? ` ${detail}` : ""}`,
+      );
+    }
+  };
+}
+
+function createSmtpSender(config: MailConfig): MailSender | undefined {
   const smtp = config.smtp;
   if (!smtp?.host || !smtp.port || !smtp.from) return undefined;
 

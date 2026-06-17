@@ -56,17 +56,24 @@ observability:
     recipients:
       - "ops@example.com"
 
-# SMTP settings for scheduled and manually triggered reports.
-# Prefer an SMTP authorization code / app password over the account password.
-# The built-in sender supports direct TLS SMTP well, e.g. port 465.
+# Mail settings for scheduled and manually triggered reports.
+# Resend uses HTTPS and is usually easier to run on VPS providers where SMTP
+# egress is blocked or email providers reject overseas SMTP IPs.
 mail:
-  smtp:
-    host: "smtp.example.com"
-    port: 465
-    secure: true
-    user: "report@example.com"
-    pass: "smtp-auth-code"
-    from: "auth2api Report <report@example.com>"
+  provider: "resend"
+  resend:
+    apiKey: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    from: "auth2api Report <report@your-domain.example>"
+    # endpoint: "https://api.resend.com/emails"
+
+  # SMTP remains supported for environments where direct SMTP works.
+  # smtp:
+  #   host: "smtp.example.com"
+  #   port: 465
+  #   secure: true
+  #   user: "report@example.com"
+  #   pass: "smtp-auth-code"
+  #   from: "auth2api Report <report@example.com>"
 
 # Debug logging level:
 # off = no extra logs

@@ -30,6 +30,7 @@ import { AccountManager, UsageData } from "../src/accounts/manager";
 import { ApiKeyRegistry } from "../src/auth/api-key-registry";
 import { buildSessionBindingKey } from "../src/routing/session";
 import { parseRoutingExtraArg } from "../src/auth/routing-extra";
+import { createMailSender } from "../src/observability/mail";
 
 // ══════════════════════════════════════════════════
 // utils/common.ts
@@ -2378,5 +2379,62 @@ test("StatsRecorder replay ignores partial schema rows without polluting aggrega
     await recorder.stop();
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createMailSender sends report through Resend", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured: { url: string; init: RequestInit } | null = null;
+  globalThis.fetch = (async (url: any, init?: any) => {
+    captured = { url: String(url), init };
+    return new Response(JSON.stringify({ id: "email_123" }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const sendMail = createMailSender({
+      provider: "resend",
+      resend: {
+        apiKey: "re_test",
+        from: "auth2api <report@example.com>",
+        endpoint: "https://api.resend.test/emails",
+      },
+    });
+    assert.ok(sendMail);
+    await sendMail("日报", { text: "plain", html: "<b>html</b>" }, [
+      "ops@example.com",
+    ]);
+    assert.equal(captured?.url, "https://api.resend.test/emails");
+    assert.equal(
+      (captured?.init.headers as Record<string, string>).Authorization,
+      "Bearer re_test",
+    );
+    const body = JSON.parse(String(captured?.init.body));
+    assert.deepEqual(body.to, ["ops@example.com"]);
+    assert.equal(body.from, "auth2api <report@example.com>");
+    assert.equal(body.subject, "日报");
+    assert.equal(body.text, "plain");
+    assert.equal(body.html, "<b>html</b>");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createMailSender surfaces Resend errors", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response('{"message":"bad key"}', { status: 401 })) as typeof fetch;
+  try {
+    const sendMail = createMailSender({
+      resend: {
+        apiKey: "re_bad",
+        from: "auth2api <report@example.com>",
+      },
+    });
+    assert.ok(sendMail);
+    await assert.rejects(
+      () => sendMail("日报", { text: "plain" }, ["ops@example.com"]),
+      /Resend email failed: 401/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

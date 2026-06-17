@@ -65,6 +65,12 @@ export interface ObservabilityConfig {
 }
 
 export interface MailConfig {
+  provider?: "smtp" | "resend";
+  resend?: {
+    apiKey: string;
+    from: string;
+    endpoint?: string;
+  };
   smtp?: {
     host: string;
     port: number;
@@ -269,6 +275,11 @@ export function loadConfig(configPath?: string): Config {
       mail: {
         ...DEFAULT_RAW.mail,
         ...(parsed.mail || {}),
+        resend: parsed.mail?.resend
+          ? {
+              ...parsed.mail.resend,
+            }
+          : DEFAULT_RAW.mail.resend,
         smtp: parsed.mail?.smtp
           ? {
               ...parsed.mail.smtp,

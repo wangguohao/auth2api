@@ -80,7 +80,10 @@ test("chatToResponsesRequest: converts assistant tool_calls to function_call ite
         function: {
           name: "get_weather",
           description: "Get weather",
-          parameters: { type: "object", properties: { city: { type: "string" } } },
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+          },
         },
       },
     ],
@@ -234,11 +237,11 @@ test("responsesToChatCompletion: assembles text + reasoning + tool calls", () =>
   assert.equal(completion.object, "chat.completion");
   assert.equal(completion.model, "gpt-5.5-medium");
   assert.equal(completion.choices[0].message.content, "Hello, world!");
+  assert.equal(completion.choices[0].message.reasoning_content, "Thinking...");
   assert.equal(
-    completion.choices[0].message.reasoning_content,
-    "Thinking...",
+    completion.choices[0].message.tool_calls[0].function.name,
+    "do_thing",
   );
-  assert.equal(completion.choices[0].message.tool_calls[0].function.name, "do_thing");
   assert.equal(completion.choices[0].finish_reason, "tool_calls");
   assert.equal(completion.usage.prompt_tokens, 10);
   assert.equal(completion.usage.completion_tokens, 5);
@@ -274,7 +277,11 @@ test("responsesToAnthropicMessage: emits thinking + text + tool_use blocks in or
           arguments: '{"k":"v"}',
         },
       ],
-      usage: { input_tokens: 3, output_tokens: 2 },
+      usage: {
+        input_tokens: 3,
+        output_tokens: 2,
+        input_tokens_details: { cached_tokens: 1 },
+      },
     },
     "claude-sonnet-4-5",
   );
@@ -288,6 +295,8 @@ test("responsesToAnthropicMessage: emits thinking + text + tool_use blocks in or
   assert.equal(msg.stop_reason, "tool_use");
   assert.equal(msg.usage.input_tokens, 3);
   assert.equal(msg.usage.output_tokens, 2);
+  assert.equal(msg.usage.cache_creation_input_tokens, 0);
+  assert.equal(msg.usage.cache_read_input_tokens, 1);
 });
 
 // ───────────────── responsesSSEToChat (streaming) ─────────────────
@@ -295,7 +304,13 @@ test("responsesToAnthropicMessage: emits thinking + text + tool_use blocks in or
 test("responsesSSEToChat: emits role primer, text deltas, finish + [DONE]", () => {
   const state = makeResponsesToChatState("gpt-5.5-medium");
   const chunks: string[] = [];
-  chunks.push(...responsesSSEToChat("response.created", { type: "response.created" }, state));
+  chunks.push(
+    ...responsesSSEToChat(
+      "response.created",
+      { type: "response.created" },
+      state,
+    ),
+  );
   chunks.push(
     ...responsesSSEToChat("response.output_text.delta", { delta: "Hi" }, state),
   );
@@ -320,7 +335,9 @@ test("responsesSSEToChat: emits role primer, text deltas, finish + [DONE]", () =
   assert.match(all, /"finish_reason":"stop"/);
   assert.match(all, /data: \[DONE\]/);
   // every line should reference the same chatcmpl id
-  const ids = [...all.matchAll(/"id":"(chatcmpl-[a-f0-9]+)"/g)].map((m) => m[1]);
+  const ids = [...all.matchAll(/"id":"(chatcmpl-[a-f0-9]+)"/g)].map(
+    (m) => m[1],
+  );
   assert.ok(ids.length >= 3);
   assert.equal(new Set(ids).size, 1);
 });
@@ -454,8 +471,14 @@ test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id d
     ),
   ];
   const all = out.join("");
-  assert.match(all, /"content_block":\{"type":"tool_use","id":"call_xyz","name":"get_weather"/);
-  assert.match(all, /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/);
+  assert.match(
+    all,
+    /"content_block":\{"type":"tool_use","id":"call_xyz","name":"get_weather"/,
+  );
+  assert.match(
+    all,
+    /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/,
+  );
   assert.match(all, /"stop_reason":"tool_use"/);
 });
 
@@ -480,7 +503,11 @@ test("responsesSSEToAnthropic: emits message_start → text block → message_st
       {
         response: {
           status: "completed",
-          usage: { input_tokens: 1, output_tokens: 2 },
+          usage: {
+            input_tokens: 1,
+            output_tokens: 2,
+            input_tokens_details: { cached_tokens: 1 },
+          },
         },
       },
       state,
@@ -494,6 +521,7 @@ test("responsesSSEToAnthropic: emits message_start → text block → message_st
   assert.match(all, /"type":"text_delta","text":" world"/);
   assert.match(all, /event: content_block_stop/);
   assert.match(all, /"stop_reason":"end_turn"/);
+  assert.match(all, /"cache_read_input_tokens":1/);
   assert.match(all, /event: message_stop/);
 });
 
@@ -553,7 +581,10 @@ test("responsesSSEToAnthropic: tool calls become tool_use blocks with input_json
     ),
   ];
   const all = out.join("");
-  assert.match(all, /"content_block":\{"type":"tool_use","id":"call_1","name":"f"/);
+  assert.match(
+    all,
+    /"content_block":\{"type":"tool_use","id":"call_1","name":"f"/,
+  );
   assert.match(all, /"type":"input_json_delta","partial_json":"\{\\"x\\":1\}"/);
   // tool_use must set stop_reason=tool_use in the final message_delta
   assert.match(all, /"stop_reason":"tool_use"/);
@@ -563,8 +594,8 @@ test("responsesSSEToAnthropic: tool calls become tool_use blocks with input_json
 
 test("readSseEvents: emits each event/data pair in order", async () => {
   const resp = makeStreamingResponse([
-    "event: a\ndata: {\"x\":1}\n\n",
-    "event: b\ndata: {\"y\":2}\n\n",
+    'event: a\ndata: {"x":1}\n\n',
+    'event: b\ndata: {"y":2}\n\n',
   ]);
   const events: Array<{ event: string; data: any }> = [];
   for await (const ev of readSseEvents(resp)) events.push(ev);
@@ -577,8 +608,8 @@ test("readSseEvents: emits each event/data pair in order", async () => {
 test("readSseEvents: stitches lines split across chunk boundaries", async () => {
   const resp = makeStreamingResponse([
     "event: a\nda",
-    "ta: {\"x\":1}\n\nevent: b\n",
-    "data: {\"y\":2}\n\n",
+    'ta: {"x":1}\n\nevent: b\n',
+    'data: {"y":2}\n\n',
   ]);
   const events: Array<{ event: string; data: any }> = [];
   for await (const ev of readSseEvents(resp)) events.push(ev);
@@ -592,7 +623,7 @@ test("readSseEvents: flushes the final un-terminated line on stream close", asyn
   // Crucially: no trailing \n on the last data: line. Previous hand-rolled
   // drains in handlers would silently drop this final event.
   const resp = makeStreamingResponse([
-    "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}",
+    'event: response.completed\ndata: {"response":{"status":"completed"}}',
   ]);
   const events: Array<{ event: string; data: any }> = [];
   for await (const ev of readSseEvents(resp)) events.push(ev);
@@ -602,9 +633,7 @@ test("readSseEvents: flushes the final un-terminated line on stream close", asyn
 });
 
 test("readSseEvents: handles \\r\\n line endings transparently", async () => {
-  const resp = makeStreamingResponse([
-    "event: a\r\ndata: {\"x\":1}\r\n\r\n",
-  ]);
+  const resp = makeStreamingResponse(['event: a\r\ndata: {"x":1}\r\n\r\n']);
   const events: Array<{ event: string; data: any }> = [];
   for await (const ev of readSseEvents(resp)) events.push(ev);
   assert.deepEqual(events, [{ event: "a", data: { x: 1 } }]);
@@ -613,7 +642,7 @@ test("readSseEvents: handles \\r\\n line endings transparently", async () => {
 test("readSseEvents: tolerates unparseable JSON by yielding data:null", async () => {
   const resp = makeStreamingResponse([
     "event: a\ndata: not-json\n\n",
-    "event: b\ndata: {\"y\":2}\n\n",
+    'event: b\ndata: {"y":2}\n\n',
   ]);
   const events: Array<{ event: string; data: any }> = [];
   for await (const ev of readSseEvents(resp)) events.push(ev);
@@ -630,7 +659,9 @@ test("drainCodexResponsesSse: captures completed response verbatim", async () =>
     id: "resp_x",
     object: "response",
     status: "completed",
-    output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }],
+    output: [
+      { type: "message", content: [{ type: "output_text", text: "hi" }] },
+    ],
     usage: { input_tokens: 3, output_tokens: 1 },
   };
   const resp = makeStreamingResponse([
@@ -656,7 +687,9 @@ test("drainCodexResponsesSse: captures the final response.completed even without
   const completed = {
     id: "resp_short",
     status: "completed",
-    output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+    output: [
+      { type: "message", content: [{ type: "output_text", text: "ok" }] },
+    ],
     usage: { input_tokens: 1, output_tokens: 1 },
   };
   const resp = makeStreamingResponse([
@@ -748,10 +781,12 @@ test("responsesSSEToAnthropic: a single tool block emits exactly one content_blo
   const all = out.join("");
   // Count content_block_stop events for the tool block (index 0
   // since it's the first block opened in this stream).
-  const stops = all.match(
-    /"type":"content_block_stop","index":0/g,
+  const stops = all.match(/"type":"content_block_stop","index":0/g);
+  assert.equal(
+    stops?.length,
+    1,
+    `expected exactly one content_block_stop for the tool block, saw ${stops?.length}`,
   );
-  assert.equal(stops?.length, 1, `expected exactly one content_block_stop for the tool block, saw ${stops?.length}`);
 });
 
 test("drainCodexResponsesSse: surfaces response.failed errors", async () => {

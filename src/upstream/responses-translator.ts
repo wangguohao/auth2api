@@ -61,7 +61,10 @@ export interface DrainedCodexResponses {
 export async function drainCodexResponsesSse(
   upstream: Response,
 ): Promise<DrainedCodexResponses> {
-  const toolCalls = new Map<string, { id: string; name: string; args: string }>();
+  const toolCalls = new Map<
+    string,
+    { id: string; name: string; args: string }
+  >();
   // codex `function_call_arguments.delta` events reference the parent
   // item by `item_id` (the internal `fc_…` id), not by `call_id` (the
   // public `call_…` id we key `toolCalls` by). Track the mapping
@@ -245,7 +248,11 @@ export function chatToResponsesRequest(body: any): any {
       continue;
     }
 
-    if (role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+    if (
+      role === "assistant" &&
+      Array.isArray(msg.tool_calls) &&
+      msg.tool_calls.length
+    ) {
       const text = extractText(msg.content);
       if (text) {
         inputItems.push({
@@ -270,7 +277,8 @@ export function chatToResponsesRequest(body: any): any {
     } else if (Array.isArray(msg.content)) {
       const parts = msg.content
         .map((part: any) => {
-          if (typeof part === "string") return { type: "input_text", text: part };
+          if (typeof part === "string")
+            return { type: "input_text", text: part };
           if (part?.type === "text") {
             return {
               type: role === "assistant" ? "output_text" : "input_text",
@@ -530,8 +538,7 @@ export function responsesToAnthropicMessage(resp: any, model: string): any {
     usage: {
       input_tokens: resp?.usage?.input_tokens || 0,
       output_tokens: resp?.usage?.output_tokens || 0,
-      cache_creation_input_tokens:
-        resp?.usage?.input_tokens_details?.cached_tokens || 0,
+      cache_creation_input_tokens: 0,
       cache_read_input_tokens:
         resp?.usage?.input_tokens_details?.cached_tokens || 0,
     },
@@ -584,9 +591,7 @@ function buildChatChunk(
     created: state.created,
     model: state.model,
     system_fingerprint: state.fingerprint,
-    choices: [
-      { index: 0, delta, finish_reason: finishReason, logprobs: null },
-    ],
+    choices: [{ index: 0, delta, finish_reason: finishReason, logprobs: null }],
   };
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
@@ -960,6 +965,8 @@ export function responsesSSEToAnthropic(
       if (r?.usage) {
         state.inputTokens = r.usage.input_tokens || 0;
         state.outputTokens = r.usage.output_tokens || 0;
+        state.cacheReadTokens =
+          r.usage.input_tokens_details?.cached_tokens || 0;
       }
       if (r?.status === "incomplete" && state.stopReason === "end_turn") {
         state.stopReason = "max_tokens";
@@ -970,7 +977,11 @@ export function responsesSSEToAnthropic(
         sseEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: state.stopReason, stop_sequence: null },
-          usage: { output_tokens: state.outputTokens },
+          usage: {
+            output_tokens: state.outputTokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: state.cacheReadTokens,
+          },
         }),
       );
       out.push(sseEvent("message_stop", { type: "message_stop" }));
