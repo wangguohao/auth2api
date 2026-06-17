@@ -209,10 +209,13 @@ export async function proxyWithRetry(
           );
         }
         if (attempt < maxRetries - 1) {
+          // 记录 429/5xx 后的退避等待耗时，用于慢请求归因。
+          const retryStartedAt = performance.now();
           const shouldContinue = await waitForRetry(
             (attempt + 1) * 1000,
             requestController.signal,
           );
+          addTraceStep(resp as any, "retry_wait", retryStartedAt);
           if (!shouldContinue) return;
           continue;
         }
@@ -318,10 +321,13 @@ export async function proxyWithRetry(
 
       if (!RETRYABLE_STATUSES.has(lastStatus)) break;
       if (attempt < maxRetries - 1) {
+        // 记录 429/5xx 后的退避等待耗时，用于慢请求归因。
+        const retryStartedAt = performance.now();
         const shouldContinue = await waitForRetry(
           (attempt + 1) * 1000,
           requestController.signal,
         );
+        addTraceStep(resp as any, "retry_wait", retryStartedAt);
         if (!shouldContinue) return;
       }
     }

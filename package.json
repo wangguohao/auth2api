@@ -8,6 +8,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "login": "tsx src/index.ts --login",
+    "obs:report": "tsx scripts/observability.ts report",
+    "obs:slow": "tsx scripts/observability.ts slow",
+    "obs:trace": "tsx scripts/observability.ts trace",
+    "obs:explain": "tsx scripts/observability.ts explain",
     "test": "tsx --test tests/*.test.ts",
     "test:smoke": "tsx --test tests/smoke.test.ts",
     "prettier": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\""

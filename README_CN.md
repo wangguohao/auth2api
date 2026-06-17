@@ -431,6 +431,58 @@ stats:
   enabled: false
 ```
 
+### 网关可观测性
+
+当需要基于真实样本分析路由、缓存、慢请求或稳定性问题时，可以开启 trace 日志与每日可观测报告：
+
+```yaml
+observability:
+  enabled: true
+  trace:
+    enabled: true
+    retentionDays: 14
+  report:
+    enabled: true
+    scheduleHour: 2
+    timezone: "Asia/Shanghai"
+    recipients:
+      - "ops@example.com"
+
+mail:
+  provider: "resend"
+  resend:
+    apiKey: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    from: "auth2api Report <report@your-domain.example>"
+```
+
+trace 事件会写入 `<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`。每条事件包含 `traceId`、路由决策、缓存命中/未命中、上游尝试记录、失败类型、token 用量与分步骤延迟。每日 HTML 报告会生成在 `<auth-dir>/observability/reports/`。
+
+也可以主动触发指定日期的日报：
+
+```bash
+curl -X POST http://127.0.0.1:8317/admin/reports/daily \
+  -H "Authorization: Bearer <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"date":"2026-06-17","sendEmail":true}'
+```
+
+本地分析脚本会直接读取 trace JSONL，适合从日报里的慢请求继续定位原因：
+
+```bash
+npm run obs:slow -- --date 2026-06-17 --limit 20
+npm run obs:trace -- --date 2026-06-17 --trace-id <trace-id>
+npm run obs:explain -- --date 2026-06-17 --trace-id <trace-id>
+npm run obs:report -- --date 2026-06-17 --send-email
+```
+
+建议流程是先用 `obs:slow` 找到当天最慢的 trace，再用 `obs:explain` 对单个 trace 做快速归因。归因逻辑主要参考：
+
+- `upstream_fetch_headers`：上游首包慢或上游排队耗时
+- `retry_wait` 与 `attempts[]`：429、5xx 或网络错误后的重试等待
+- `success_handler`：响应转换、流式转发或本地消费耗时
+- `routing.accountReason` 与 `cache.sessionRoute`：账号选择和会话粘滞路由
+- `cache.promptCacheReadTokens`：prompt cache 是否有效命中
+
 `--login` 端的提示信息:
 
 - `Notified running auth2api server to reload tokens.` —— 成功,服务已加载新 token。

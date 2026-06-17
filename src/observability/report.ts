@@ -22,6 +22,9 @@ interface DailySummary {
   modelRouteMisses: number;
   sessionRouteHits: number;
   sessionRouteMisses: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
   promptCacheReadTokens: number;
   promptCacheCreationTokens: number;
   latencies: number[];
@@ -67,6 +70,14 @@ export interface DailyReportSummaryView {
     promptCacheReadTokens: string;
     promptCacheCreationTokens: string;
   };
+  tokens: {
+    inputTokens: string;
+    outputTokens: string;
+    reasoningOutputTokens: string;
+    promptCacheReadTokens: string;
+    promptCacheCreationTokens: string;
+    totalTokens: string;
+  };
   slowRequests: Array<{
     traceId: string;
     latency: string;
@@ -91,6 +102,9 @@ function emptySummary(date: string): DailySummary {
     modelRouteMisses: 0,
     sessionRouteHits: 0,
     sessionRouteMisses: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
     promptCacheReadTokens: 0,
     promptCacheCreationTokens: 0,
     latencies: [],
@@ -153,7 +167,9 @@ function buildSummaryView(summary: DailySummary): DailyReportSummaryView {
   const sessionRouteTotal =
     summary.sessionRouteHits + summary.sessionRouteMisses;
   const modelRouteHitRate =
-    modelRouteTotal === 0 ? 0 : (summary.modelRouteHits / modelRouteTotal) * 100;
+    modelRouteTotal === 0
+      ? 0
+      : (summary.modelRouteHits / modelRouteTotal) * 100;
   const sessionRouteHitRate =
     sessionRouteTotal === 0
       ? 0
@@ -184,6 +200,20 @@ function buildSummaryView(summary: DailySummary): DailyReportSummaryView {
         summary.promptCacheCreationTokens,
       ),
     },
+    tokens: {
+      inputTokens: formatNumber(summary.inputTokens),
+      outputTokens: formatNumber(summary.outputTokens),
+      reasoningOutputTokens: formatNumber(summary.reasoningOutputTokens),
+      promptCacheReadTokens: formatNumber(summary.promptCacheReadTokens),
+      promptCacheCreationTokens: formatNumber(
+        summary.promptCacheCreationTokens,
+      ),
+      totalTokens: formatNumber(
+        summary.inputTokens +
+          summary.outputTokens +
+          summary.reasoningOutputTokens,
+      ),
+    },
     slowRequests: summary.slowRequests.map((r) => ({
       traceId: r.traceId,
       latency: formatMs(r.latencyMs),
@@ -207,6 +237,9 @@ function applyEvent(summary: DailySummary, event: TraceEvent): void {
   if (event.cache.modelRoute === "miss") summary.modelRouteMisses++;
   if (event.cache.sessionRoute === "hit") summary.sessionRouteHits++;
   if (event.cache.sessionRoute === "miss") summary.sessionRouteMisses++;
+  summary.inputTokens += event.usage?.inputTokens || 0;
+  summary.outputTokens += event.usage?.outputTokens || 0;
+  summary.reasoningOutputTokens += event.usage?.reasoningOutputTokens || 0;
   summary.promptCacheReadTokens += event.cache.promptCacheReadTokens || 0;
   summary.promptCacheCreationTokens +=
     event.cache.promptCacheCreationTokens || 0;
@@ -252,21 +285,28 @@ function renderMarkdown(summary: DailySummary): string {
 - P95: ${view.latency.p95}
 - P99: ${view.latency.p99}
 
-## Provider 分布
+## 服务商分布
 
 ${topEntries(summary.byProvider)}
-## Endpoint 分布
+## 接口分布
 
 ${topEntries(summary.byEndpoint)}
 ## 失败类型
 
 ${topEntries(summary.failureKinds)}
-## Cache
+## Token 用量
 
-- model route hit/miss: ${summary.modelRouteHits}/${summary.modelRouteMisses} (${view.cache.modelRouteHitRate} hit)
-- session route hit/miss: ${summary.sessionRouteHits}/${summary.sessionRouteMisses} (${view.cache.sessionRouteHitRate} hit)
-- prompt cache read tokens: ${view.cache.promptCacheReadTokens}
-- prompt cache creation tokens: ${view.cache.promptCacheCreationTokens}
+- 输入 token: ${view.tokens.inputTokens}
+- 输出 token: ${view.tokens.outputTokens}
+- 推理输出 token: ${view.tokens.reasoningOutputTokens}
+- 输入缓存命中 token: ${view.tokens.promptCacheReadTokens}
+- 输入缓存写入 token: ${view.tokens.promptCacheCreationTokens}
+- 总 token: ${view.tokens.totalTokens}
+
+## 缓存与路由
+
+- 模型路由缓存命中/未命中: ${summary.modelRouteHits}/${summary.modelRouteMisses} (${view.cache.modelRouteHitRate})
+- 会话路由缓存命中/未命中: ${summary.sessionRouteHits}/${summary.sessionRouteMisses} (${view.cache.sessionRouteHitRate})
 
 ## 慢请求 Top 20
 
@@ -361,7 +401,7 @@ function renderHtml(summary: DailySummary): string {
       <div class="card"><div class="label">请求数</div><div class="value">${formatNumber(view.requests)}</div></div>
       <div class="card"><div class="label">成功率</div><div class="value">${view.successRate}</div></div>
       <div class="card"><div class="label">P95 延迟</div><div class="value">${view.latency.p95}</div></div>
-      <div class="card"><div class="label">Cache Read Tokens</div><div class="value">${view.cache.promptCacheReadTokens}</div></div>
+      <div class="card"><div class="label">总 Token</div><div class="value">${view.tokens.totalTokens}</div></div>
     </div>
 
     <section class="panel">
@@ -375,19 +415,29 @@ function renderHtml(summary: DailySummary): string {
     </section>
 
     <div class="two-col">
-      ${listSection("Provider 分布", view.providerDistribution)}
-      ${listSection("Endpoint 分布", view.endpointDistribution)}
+      ${listSection("服务商分布", view.providerDistribution)}
+      ${listSection("接口分布", view.endpointDistribution)}
     </div>
+
+    <section class="panel">
+      <h2>Token 用量</h2>
+      <div class="kv">
+        <div class="kv-item"><div class="kv-label">输入 token</div><div class="kv-value">${view.tokens.inputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输出 token</div><div class="kv-value">${view.tokens.outputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">推理输出 token</div><div class="kv-value">${view.tokens.reasoningOutputTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">总 token</div><div class="kv-value">${view.tokens.totalTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输入缓存命中 token</div><div class="kv-value">${view.tokens.promptCacheReadTokens}</div></div>
+        <div class="kv-item"><div class="kv-label">输入缓存写入 token</div><div class="kv-value">${view.tokens.promptCacheCreationTokens}</div></div>
+      </div>
+    </section>
 
     <div class="two-col">
       ${listSection("失败类型", view.failureKinds)}
       <section class="panel">
-        <h2>Cache</h2>
+        <h2>缓存与路由</h2>
         <div class="kv">
-          <div class="kv-item"><div class="kv-label">Model Route</div><div class="kv-value">${view.cache.modelRouteHits}/${view.cache.modelRouteMisses} (${view.cache.modelRouteHitRate})</div></div>
-          <div class="kv-item"><div class="kv-label">Session Route</div><div class="kv-value">${view.cache.sessionRouteHits}/${view.cache.sessionRouteMisses} (${view.cache.sessionRouteHitRate})</div></div>
-          <div class="kv-item"><div class="kv-label">Prompt Cache Read</div><div class="kv-value">${view.cache.promptCacheReadTokens}</div></div>
-          <div class="kv-item"><div class="kv-label">Prompt Cache Creation</div><div class="kv-value">${view.cache.promptCacheCreationTokens}</div></div>
+          <div class="kv-item"><div class="kv-label">模型路由缓存</div><div class="kv-value">${view.cache.modelRouteHits}/${view.cache.modelRouteMisses} (${view.cache.modelRouteHitRate})</div></div>
+          <div class="kv-item"><div class="kv-label">会话路由缓存</div><div class="kv-value">${view.cache.sessionRouteHits}/${view.cache.sessionRouteMisses} (${view.cache.sessionRouteHitRate})</div></div>
         </div>
       </section>
     </div>
@@ -397,12 +447,12 @@ function renderHtml(summary: DailySummary): string {
       <table>
         <thead>
           <tr>
-            <th>Trace ID</th>
+            <th>追踪 ID</th>
             <th>延迟</th>
             <th>状态码</th>
-            <th>Provider</th>
-            <th>Model</th>
-            <th>Endpoint</th>
+            <th>服务商</th>
+            <th>模型</th>
+            <th>接口</th>
           </tr>
         </thead>
         <tbody>${slowRows}</tbody>

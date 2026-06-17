@@ -431,6 +431,64 @@ stats:
   enabled: false
 ```
 
+### Gateway observability
+
+Enable trace logging and daily reports when you need to diagnose routing,
+cache, or latency issues from real samples:
+
+```yaml
+observability:
+  enabled: true
+  trace:
+    enabled: true
+    retentionDays: 14
+  report:
+    enabled: true
+    scheduleHour: 2
+    timezone: "Asia/Shanghai"
+    recipients:
+      - "ops@example.com"
+
+mail:
+  provider: "resend"
+  resend:
+    apiKey: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    from: "auth2api Report <report@your-domain.example>"
+```
+
+Trace events are written to
+`<auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl`. Each event contains
+`traceId`, routing decisions, cache hit/miss, upstream attempts, failure kind,
+usage, and per-step latency. Daily reports are generated as HTML under
+`<auth-dir>/observability/reports/`.
+
+You can also trigger a report manually:
+
+```bash
+curl -X POST http://127.0.0.1:8317/admin/reports/daily \
+  -H "Authorization: Bearer <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"date":"2026-06-17","sendEmail":true}'
+```
+
+Local analysis helpers read the trace JSONL directly:
+
+```bash
+npm run obs:slow -- --date 2026-06-17 --limit 20
+npm run obs:trace -- --date 2026-06-17 --trace-id <trace-id>
+npm run obs:explain -- --date 2026-06-17 --trace-id <trace-id>
+npm run obs:report -- --date 2026-06-17 --send-email
+```
+
+Use `obs:slow` to find slow traces from a daily report, then `obs:explain` to
+classify the likely cause. The explainer looks at:
+
+- `upstream_fetch_headers` — upstream first-byte / queueing latency
+- `retry_wait` and `attempts[]` — retry backoff after 429 / 5xx / network errors
+- `success_handler` — response transform, stream forwarding, or local drain time
+- `routing.accountReason` and `cache.sessionRoute` — sticky/session routing
+- `cache.promptCacheReadTokens` — prompt cache effectiveness
+
 Failure modes of the auto-notify (printed by `--login`):
 
 - `Notified running auth2api server to reload tokens.` — success, server picked up the new token.

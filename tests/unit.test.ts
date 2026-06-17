@@ -1371,6 +1371,8 @@ import { presentStatsSnapshot } from "../src/stats/presenter";
 import { replayStatsEvents, statsFilePath } from "../src/stats/storage";
 import { createServer } from "../src/server";
 import { ApiKeyRegistry } from "../src/auth/api-key-registry";
+import { TraceEvent, TraceRecorder } from "../src/observability/trace";
+import { generateDailyReport } from "../src/observability/report";
 
 function makeApiKeyRegistry(authDir: string): ApiKeyRegistry {
   const registry = new ApiKeyRegistry(authDir, {
@@ -2377,6 +2379,109 @@ test("StatsRecorder replay ignores partial schema rows without polluting aggrega
     assert.equal(snap.totals.requests, 0);
     assert.deepEqual(snap.byClient, {});
     await recorder.stop();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("generateDailyReport renders chinese token usage", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-report-"));
+  try {
+    const date = "2026-06-17";
+    let sentBody: { text: string; html: string } | null = null;
+    const recorder = new TraceRecorder(tmp, {
+      enabled: true,
+      trace: { enabled: true, retentionDays: 14 },
+      report: {
+        enabled: true,
+        scheduleHour: 2,
+        timezone: "Asia/Shanghai",
+        retentionDays: 14,
+        recipients: ["ops@example.com"],
+      },
+    });
+    fs.mkdirSync(path.dirname(recorder.traceFilePath(date)), {
+      recursive: true,
+    });
+    const event: TraceEvent = {
+      v: 1,
+      ts: "2026-06-17T12:00:00.000Z",
+      traceId: "trace-token",
+      endpoint: "POST /v1/chat/completions",
+      method: "POST",
+      path: "/v1/chat/completions",
+      apiKeyHash: "a".repeat(64),
+      apiKeyName: "client-a",
+      ip: "127.0.0.1",
+      ua: "test",
+      model: "gpt-5.5",
+      provider: "codex",
+      accountEmailHash: "acct",
+      status: "success",
+      failureKind: null,
+      statusCode: 200,
+      latencyMs: 1234,
+      routing: {},
+      cache: {
+        modelRoute: "hit",
+        sessionRoute: "miss",
+        promptCacheReadTokens: 30,
+        promptCacheCreationTokens: 4,
+      },
+      steps: [],
+      attempts: [],
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheCreationInputTokens: 4,
+        cacheReadInputTokens: 30,
+        reasoningOutputTokens: 7,
+      },
+    };
+    fs.writeFileSync(
+      recorder.traceFilePath(date),
+      `${JSON.stringify(event)}\n`,
+    );
+
+    const result = await generateDailyReport(
+      {
+        observability: {
+          enabled: true,
+          trace: { enabled: true, retentionDays: 14 },
+          report: {
+            enabled: true,
+            scheduleHour: 2,
+            timezone: "Asia/Shanghai",
+            retentionDays: 14,
+            recipients: ["ops@example.com"],
+          },
+        },
+      } as any,
+      recorder,
+      { date, sendEmail: true },
+      async (_subject, body) => {
+        sentBody = body;
+      },
+    );
+
+    assert.equal(result.emailed, true);
+    assert.equal(result.summary.tokens.inputTokens, "100");
+    assert.equal(result.summary.tokens.outputTokens, "50");
+    assert.equal(result.summary.tokens.reasoningOutputTokens, "7");
+    assert.equal(result.summary.tokens.promptCacheReadTokens, "30");
+    assert.equal(result.summary.tokens.promptCacheCreationTokens, "4");
+    assert.equal(result.summary.tokens.totalTokens, "157");
+    assert.match(result.html, /Token 用量/);
+    assert.match(result.html, /输入 token/);
+    assert.match(result.html, /输入缓存命中 token/);
+    assert.match(result.html, /缓存与路由/);
+    assert.match(result.html, /服务商分布/);
+    assert.doesNotMatch(result.html, /Cache Read Tokens/);
+    assert.doesNotMatch(result.html, /Provider 分布/);
+    assert.ok(sentBody);
+    assert.match(sentBody.text, /服务商分布/);
+    assert.match(sentBody.text, /输入 token: 100/);
+    assert.doesNotMatch(sentBody.text, /Provider 分布/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
