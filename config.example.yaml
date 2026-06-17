@@ -42,7 +42,7 @@ stats:
 # Gateway observability. Trace events are appended to:
 #   <auth-dir>/observability/traces/trace-YYYY-MM-DD.jsonl
 # Daily reports are saved to:
-#   <auth-dir>/observability/reports/daily-YYYY-MM-DD.md
+#   <auth-dir>/observability/reports/daily-YYYY-MM-DD.html
 observability:
   enabled: false
   trace:

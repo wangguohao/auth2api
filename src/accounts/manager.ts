@@ -97,6 +97,52 @@ export interface AccountRoutingDecision {
   selectedLevel?: RoutingLevel;
 }
 
+export interface AccountDecisionCandidateDiagnostic {
+  email: string;
+  selected: boolean;
+  available: boolean;
+  allowedForTier: boolean;
+  cooldownUntil: string | null;
+  lastFailureKind: AccountFailureKind | null;
+  lastError: string | null;
+  routingLevel: RoutingLevel;
+  planType?: string;
+  baseScore?: number;
+  resetUrgency?: number | null;
+  finalScore?: number | null;
+  sessionBinding: {
+    requested: boolean;
+    matched: boolean;
+    reusable: boolean;
+    expiresAt: string | null;
+  };
+  reasons: string[];
+}
+
+export interface AccountDecisionInspection {
+  provider: ProviderId;
+  mode: RoutingMode;
+  now: string;
+  context: {
+    sessionKey: string | null;
+    model: string | null;
+    path: string | null;
+    apiKeyTier: ApiKeyTier | null;
+  };
+  sticky: {
+    lastUsedEmail: string | null;
+    stickyUntil: string | null;
+    active: boolean;
+  };
+  result: {
+    selectedAccountEmail: string | null;
+    failureKind: AccountFailureKind | null;
+    retryAfterMs: number | null;
+    decision?: AccountRoutingDecision;
+  };
+  accounts: AccountDecisionCandidateDiagnostic[];
+}
+
 type RoutingMode = "default" | "codex-smart";
 type MetadataConfidence = "unknown" | "estimated" | "observed";
 
@@ -1008,6 +1054,12 @@ export class AccountManager {
     };
   }
 
+  inspectNextAccount(ctx?: AccountSelectionContext): AccountDecisionInspection {
+    return this.routingMode === "codex-smart"
+      ? this.inspectCodexAccountSelection(ctx)
+      : this.inspectDefaultAccountSelection(ctx);
+  }
+
   private shouldRefresh(acct: AccountState, now: number): boolean {
     const policy = this.refreshPolicy;
     if (policy.kind === "expires-lead") {
@@ -1019,6 +1071,363 @@ export class AccountManager {
     if (!acct.lastRefreshAt) return false;
     const last = new Date(acct.lastRefreshAt).getTime();
     return now - last >= policy.maxAgeMs;
+  }
+
+  private inspectDefaultAccountSelection(
+    ctx?: AccountSelectionContext,
+  ): AccountDecisionInspection {
+    const now = Date.now();
+    const accounts = this.accountOrder.map((email) =>
+      this.buildDiagnosticCandidate(email, now, ctx, false),
+    );
+    const base = this.buildInspectionBase(now, ctx, accounts);
+    const count = this.accountOrder.length;
+    if (count === 0) {
+      base.result = {
+        selectedAccountEmail: null,
+        failureKind: null,
+        retryAfterMs: null,
+        decision: {
+          mode: "default",
+          reason: "no_accounts",
+          sessionCache: "none",
+          candidateCount: 0,
+        },
+      };
+      return base;
+    }
+
+    if (count === 1 && !ctx?.apiKeyTier) {
+      const only = accounts[0];
+      if (only.available) {
+        only.selected = true;
+        only.reasons.push("selected:single_available_account");
+        base.result = {
+          selectedAccountEmail: only.email,
+          failureKind: null,
+          retryAfterMs: null,
+          decision: {
+            mode: "default",
+            reason: "single_available_account",
+            sessionCache: "none",
+            candidateCount: 1,
+            selectedLevel: only.routingLevel,
+          },
+        };
+        return base;
+      }
+      only.reasons.push("rejected:cooldown_active");
+      return this.attachCooldownResult(base, accounts, now, "default", "none");
+    }
+
+    const stickyEmail =
+      this.lastUsedIndex >= 0 ? this.accountOrder[this.lastUsedIndex] : null;
+    const sticky = stickyEmail
+      ? accounts.find((item) => item.email === stickyEmail) || null
+      : null;
+    if (sticky && now < this.stickyUntil) {
+      if (sticky.available && sticky.allowedForTier) {
+        sticky.selected = true;
+        sticky.reasons.push("selected:sticky_account");
+        base.result = {
+          selectedAccountEmail: sticky.email,
+          failureKind: null,
+          retryAfterMs: null,
+          decision: {
+            mode: "default",
+            reason: "sticky_account",
+            sessionCache: "none",
+            candidateCount: count,
+            selectedLevel: sticky.routingLevel,
+          },
+        };
+        return base;
+      }
+      sticky.reasons.push(
+        sticky.available ? "rejected:tier_not_allowed" : "rejected:cooldown_active",
+      );
+    }
+
+    const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
+    for (let i = 0; i < count; i++) {
+      const idx = (startIdx + i) % count;
+      const candidate = accounts[idx];
+      if (candidate.available && candidate.allowedForTier) {
+        candidate.selected = true;
+        candidate.reasons.push("selected:round_robin_available_account");
+        base.result = {
+          selectedAccountEmail: candidate.email,
+          failureKind: null,
+          retryAfterMs: null,
+          decision: {
+            mode: "default",
+            reason: "round_robin_available_account",
+            sessionCache: "none",
+            candidateCount: count,
+            selectedLevel: candidate.routingLevel,
+          },
+        };
+        return base;
+      }
+      candidate.reasons.push(
+        candidate.allowedForTier
+          ? "rejected:cooldown_active"
+          : "rejected:tier_not_allowed",
+      );
+    }
+
+    if (ctx?.apiKeyTier) {
+      const tierEligible = accounts.filter((item) => item.allowedForTier);
+      if (tierEligible.length === 0) {
+        base.result = {
+          selectedAccountEmail: null,
+          failureKind: "forbidden",
+          retryAfterMs: null,
+          decision: {
+            mode: "default",
+            reason: "tier_not_allowed",
+            sessionCache: "none",
+            candidateCount: 0,
+          },
+        };
+        return base;
+      }
+    }
+
+    return this.attachCooldownResult(base, accounts, now, "default", "none");
+  }
+
+  private inspectCodexAccountSelection(
+    ctx?: AccountSelectionContext,
+  ): AccountDecisionInspection {
+    const now = Date.now();
+    const accounts = this.accountOrder.map((email) =>
+      this.buildDiagnosticCandidate(email, now, ctx, true),
+    );
+    const base = this.buildInspectionBase(now, ctx, accounts);
+    const count = this.accountOrder.length;
+    if (count === 0) {
+      base.result = {
+        selectedAccountEmail: null,
+        failureKind: null,
+        retryAfterMs: null,
+        decision: {
+          mode: "codex-smart",
+          reason: "no_accounts",
+          sessionCache: "none",
+          candidateCount: 0,
+        },
+      };
+      return base;
+    }
+
+    let sessionCache: "hit" | "miss" | "none" = "none";
+    if (ctx?.sessionKey) {
+      const binding = this.sessionBindings.get(ctx.sessionKey);
+      if (binding && binding.expiresAt > now) {
+        const bound = accounts.find((item) => item.email === binding.email) || null;
+        if (bound) {
+          bound.sessionBinding.matched = true;
+          bound.sessionBinding.expiresAt = new Date(binding.expiresAt).toISOString();
+          bound.sessionBinding.reusable =
+            bound.available &&
+            bound.allowedForTier &&
+            !(
+              bound.lastFailureKind === "auth" ||
+              bound.lastFailureKind === "forbidden"
+            );
+          if (bound.sessionBinding.reusable) {
+            sessionCache = "hit";
+            bound.selected = true;
+            bound.reasons.push("selected:session_binding");
+            base.result = {
+              selectedAccountEmail: bound.email,
+              failureKind: null,
+              retryAfterMs: null,
+              decision: {
+                mode: "codex-smart",
+                reason: "session_binding",
+                sessionCache,
+                candidateCount: count,
+                selectedLevel: bound.routingLevel,
+              },
+            };
+            return base;
+          }
+          bound.reasons.push("rejected:session_binding_not_reusable");
+        }
+      }
+      sessionCache = "miss";
+    }
+
+    const candidates = accounts.filter(
+      (item) => item.available && item.allowedForTier,
+    );
+    if (candidates.length === 0) {
+      if (ctx?.apiKeyTier && accounts.every((item) => !item.allowedForTier)) {
+        base.result = {
+          selectedAccountEmail: null,
+          failureKind: "forbidden",
+          retryAfterMs: null,
+          decision: {
+            mode: "codex-smart",
+            reason: "tier_not_allowed",
+            sessionCache,
+            candidateCount: 0,
+          },
+        };
+        return base;
+      }
+      return this.attachCooldownResult(
+        base,
+        accounts,
+        now,
+        "codex-smart",
+        sessionCache,
+      );
+    }
+
+    let best = candidates[0];
+    let bestScore = best.finalScore ?? Number.NEGATIVE_INFINITY;
+    for (const candidate of candidates.slice(1)) {
+      const score = candidate.finalScore ?? Number.NEGATIVE_INFINITY;
+      if (score > bestScore + 1e-9) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    best.selected = true;
+    best.reasons.push("selected:smart_score");
+    base.result = {
+      selectedAccountEmail: best.email,
+      failureKind: null,
+      retryAfterMs: null,
+      decision: {
+        mode: "codex-smart",
+        reason: "smart_score",
+        sessionCache,
+        candidateCount: candidates.length,
+        selectedLevel: best.routingLevel,
+      },
+    };
+    for (const account of accounts) {
+      if (account.selected) continue;
+      if (!account.allowedForTier) {
+        account.reasons.push("rejected:tier_not_allowed");
+      } else if (!account.available) {
+        account.reasons.push("rejected:cooldown_active");
+      } else {
+        account.reasons.push("rejected:lower_smart_score");
+      }
+    }
+    return base;
+  }
+
+  private buildInspectionBase(
+    now: number,
+    ctx: AccountSelectionContext | undefined,
+    accounts: AccountDecisionCandidateDiagnostic[],
+  ): AccountDecisionInspection {
+    const stickyEmail =
+      this.lastUsedIndex >= 0 ? this.accountOrder[this.lastUsedIndex] || null : null;
+    return {
+      provider: this.provider,
+      mode: this.routingMode,
+      now: new Date(now).toISOString(),
+      context: {
+        sessionKey: ctx?.sessionKey || null,
+        model: ctx?.model || null,
+        path: ctx?.path || null,
+        apiKeyTier: ctx?.apiKeyTier || null,
+      },
+      sticky: {
+        lastUsedEmail: stickyEmail,
+        stickyUntil: this.stickyUntil > 0 ? new Date(this.stickyUntil).toISOString() : null,
+        active: this.lastUsedIndex >= 0 && now < this.stickyUntil,
+      },
+      result: {
+        selectedAccountEmail: null,
+        failureKind: null,
+        retryAfterMs: null,
+      },
+      accounts,
+    };
+  }
+
+  private attachCooldownResult(
+    inspection: AccountDecisionInspection,
+    accounts: AccountDecisionCandidateDiagnostic[],
+    now: number,
+    mode: RoutingMode,
+    sessionCache: "hit" | "miss" | "none",
+  ): AccountDecisionInspection {
+    const emails = accounts
+      .filter((item) => item.allowedForTier)
+      .map((item) => item.email);
+    const unavailable = this.buildCooldownUnavailable(
+      emails.length > 0 ? emails : this.accountOrder,
+      now,
+    );
+    if (unavailable.account) {
+      throw new Error("internal error: cooldown result unexpectedly selected an account");
+    }
+    inspection.result = {
+      selectedAccountEmail: null,
+      failureKind: unavailable.failureKind,
+      retryAfterMs: unavailable.retryAfterMs,
+      decision: unavailable.decision ?? {
+        mode,
+        reason: "all_candidates_unavailable",
+        sessionCache,
+      },
+    };
+    for (const account of accounts) {
+      if (!account.allowedForTier) {
+        account.reasons.push("rejected:tier_not_allowed");
+      } else if (!account.available) {
+        account.reasons.push("rejected:cooldown_active");
+      }
+    }
+    return inspection;
+  }
+
+  private buildDiagnosticCandidate(
+    email: string,
+    now: number,
+    ctx: AccountSelectionContext | undefined,
+    includeScore: boolean,
+  ): AccountDecisionCandidateDiagnostic {
+    const acct = this.accounts.get(email)!;
+    const allowedForTier = this.isAccountAllowedForTier(
+      acct.routingPlan.level,
+      ctx?.apiKeyTier,
+    );
+    const available = acct.cooldownUntil <= now;
+    const resetUrgency = includeScore ? this.computeResetUrgency(acct, now) : null;
+    const finalScore = includeScore ? this.scoreCodexCandidate(acct, now) : null;
+    return {
+      email,
+      selected: false,
+      available,
+      allowedForTier,
+      cooldownUntil:
+        acct.cooldownUntil > now ? new Date(acct.cooldownUntil).toISOString() : null,
+      lastFailureKind: acct.lastFailureKind,
+      lastError: acct.lastError,
+      routingLevel: acct.routingPlan.level,
+      planType: acct.token.planType,
+      baseScore: includeScore ? acct.routingPlan.baseScore : undefined,
+      resetUrgency,
+      finalScore,
+      sessionBinding: {
+        requested: !!ctx?.sessionKey,
+        matched: false,
+        reusable: false,
+        expiresAt: null,
+      },
+      reasons: [],
+    };
   }
 
   private scheduleUsageRefresh(acct: AccountState, now: number): void {

@@ -205,8 +205,8 @@ export class TraceRecorder {
     return path.join(this.authDir, "observability", "reports");
   }
 
-  reportFilePath(dateKey: string): string {
-    return path.join(this.reportDir(), `daily-${dateKey}.md`);
+  reportHtmlFilePath(dateKey: string): string {
+    return path.join(this.reportDir(), `daily-${dateKey}.html`);
   }
 
   record(input: Omit<TraceEvent, "v" | "ts">): void {
@@ -229,7 +229,7 @@ export class TraceRecorder {
     );
     this.pruneDir(
       this.reportDir(),
-      /^daily-(\d{4}-\d{2}-\d{2})\.md$/,
+      /^daily-(\d{4}-\d{2}-\d{2})\.html$/,
       this.config.report.retentionDays,
     );
   }

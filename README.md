@@ -385,7 +385,7 @@ Reload semantics are **upsert only**: new token files on disk are added to the i
 
 Every `/v1` request that passes API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts. `/admin` management endpoints are not counted.
 
-`GET /admin/stats` returns three independent aggregate views plus a global `totals`:
+`GET /admin/stats` returns three independent aggregate views plus a global `totals`. By default it returns today's stats. Use `date=YYYY-MM-DD` for a single day, or `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` for a date range. The maximum range is the most recent 7 days.
 
 - `byClient[name]` — keyed by API key `name`; tracks requests, success / failure counts, the five token counters, total latency, and the last seen IP / User-Agent.
 - `byAccount["<provider>:<email>"]` — keyed by upstream OAuth account.
@@ -393,6 +393,9 @@ Every `/v1` request that passes API-key auth is appended as a single line to `<a
 
 ```bash
 curl http://127.0.0.1:8317/admin/stats \
+  -H "Authorization: Bearer <your-api-key>"
+
+curl "http://127.0.0.1:8317/admin/stats?start_date=2026-05-03&end_date=2026-05-09" \
   -H "Authorization: Bearer <your-api-key>"
 ```
 
@@ -416,6 +419,7 @@ curl http://127.0.0.1:8317/admin/stats \
     "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
   },
   "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
+  "range": { "start_date": "2026-05-09", "end_date": "2026-05-09" },
   "generated_at": "2026-05-09T12:00:00Z"
 }
 ```

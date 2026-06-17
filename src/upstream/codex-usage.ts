@@ -28,6 +28,20 @@ function normalizeUsedPercent(value: unknown): number | null {
   return Math.max(0, Math.min(100, Math.round(value < 1 ? value * 100 : value)));
 }
 
+function primaryWindowMeta(
+  planType: string | undefined,
+): { label: string; window: string } {
+  switch ((planType || "").toLowerCase()) {
+    case "plus":
+    case "pro":
+      return { label: "5h limit", window: "5h" };
+    case "team":
+      return { label: "Monthly limit", window: "30d" };
+    default:
+      return { label: "5h limit", window: "5h" };
+  }
+}
+
 function buildRateLimitBucket(args: {
   id: string;
   label: string;
@@ -96,10 +110,11 @@ export async function fetchCodexUsage(
 
   const body = await resp.json();
   const buckets: AccountUsageBucket[] = [];
+  const primaryMeta = primaryWindowMeta(token.planType);
   const primary = buildRateLimitBucket({
     id: "primary",
-    label: "5h limit",
-    window: "5h",
+    label: primaryMeta.label,
+    window: primaryMeta.window,
     raw: body?.rate_limit?.primary_window,
   });
   if (primary) buckets.push(primary);

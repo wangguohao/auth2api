@@ -1380,6 +1380,42 @@ test("fetchCodexUsage maps wham usage buckets", async () => {
   }
 });
 
+test("fetchCodexUsage maps team primary window to monthly label", async () => {
+  const restore = withFetchStub(async () => {
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: {
+            used_percent: 0,
+            reset_at: 1_789_992_000,
+          },
+        },
+        credits: {
+          unlimited: false,
+          balance: null,
+        },
+      }),
+      { status: 200 },
+    );
+  });
+  try {
+    const usage = await fetchCodexUsage({
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      email: "team@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct_team",
+      provider: "codex",
+      planType: "team",
+    });
+    assert.equal(usage.buckets[0].id, "primary");
+    assert.equal(usage.buckets[0].label, "Monthly limit");
+    assert.equal(usage.buckets[0].window, "30d");
+  } finally {
+    restore();
+  }
+});
+
 test("AccountManager refreshUsage updates usage snapshot fields", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
   try {

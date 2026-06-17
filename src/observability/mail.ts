@@ -3,16 +3,13 @@ import tls from "tls";
 import { MailConfig } from "../config";
 
 type Socket = net.Socket | tls.TLSSocket;
+export interface MailBody {
+  text: string;
+  html?: string;
+}
 
 function base64(value: string): string {
   return Buffer.from(value, "utf-8").toString("base64");
-}
-
-function htmlEscape(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 function extractEmail(value: string): string {
@@ -24,19 +21,45 @@ function buildMessage(
   from: string,
   recipients: string[],
   subject: string,
-  body: string,
+  body: MailBody,
 ): string {
   const encodedSubject = `=?UTF-8?B?${base64(subject)}?=`;
-  const html = `<pre style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap;">${htmlEscape(body)}</pre>`;
+  if (!body.html) {
+    return [
+      `From: ${from}`,
+      `To: ${recipients.join(", ")}`,
+      `Subject: ${encodedSubject}`,
+      "MIME-Version: 1.0",
+      'Content-Type: text/plain; charset="UTF-8"',
+      "Content-Transfer-Encoding: 8bit",
+      "",
+      body.text,
+      "",
+    ].join("\r\n");
+  }
+  const boundary = `auth2api_${Date.now().toString(36)}`;
+  const plain = body.text;
+  const html = body.html;
   return [
     `From: ${from}`,
     `To: ${recipients.join(", ")}`,
     `Subject: ${encodedSubject}`,
     "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    plain,
+    "",
+    `--${boundary}`,
     'Content-Type: text/html; charset="UTF-8"',
     "Content-Transfer-Encoding: 8bit",
     "",
     html,
+    "",
+    `--${boundary}--`,
     "",
   ].join("\r\n");
 }
@@ -133,7 +156,7 @@ function connect(config: Required<MailConfig>["smtp"]): Promise<Socket> {
 export function createMailSender(
   config: MailConfig,
 ):
-  | ((subject: string, body: string, recipients: string[]) => Promise<void>)
+  | ((subject: string, body: MailBody, recipients: string[]) => Promise<void>)
   | undefined {
   const smtp = config.smtp;
   if (!smtp?.host || !smtp.port || !smtp.from) return undefined;

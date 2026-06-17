@@ -23,6 +23,103 @@ import {
 } from "./observability/trace";
 import { generateDailyReport } from "./observability/report";
 
+/** 统计接口允许查询的最大自然日跨度。 */
+const STATS_QUERY_MAX_DAYS = 7;
+/** 统计接口接受的日期参数格式。 */
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 统计查询的半开时间区间，以及对外回显的自然日。 */
+interface StatsDateRange {
+  startAt: Date;
+  endAt: Date;
+  startDate: string;
+  endDate: string;
+}
+
+/** 将本地时区日期格式化为 YYYY-MM-DD。 */
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 解析 YYYY-MM-DD，并返回本地时区当天 00:00:00。 */
+function startOfLocalDate(value: string): Date | null {
+  if (!DATE_ONLY_PATTERN.test(value)) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+/** 按本地日历增加天数，避免调用方手写毫秒计算。 */
+function addLocalDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+/** Express query 可能是数组或对象，这里只接受单个字符串。 */
+function queryStringParam(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/** 解析 /admin/stats 的日期参数，默认当天，且限制在最近 7 天内。 */
+function resolveStatsDateRange(
+  query: express.Request["query"],
+): { ok: true; range: StatsDateRange } | { ok: false; message: string } {
+  const now = new Date();
+  const today = startOfLocalDate(formatLocalDate(now))!;
+  const earliest = addLocalDays(today, -(STATS_QUERY_MAX_DAYS - 1));
+  const todayText = formatLocalDate(today);
+  const date = queryStringParam(query.date);
+  const startDateParam = queryStringParam(query.start_date ?? query.startDate);
+  const endDateParam = queryStringParam(query.end_date ?? query.endDate);
+
+  if (date && (startDateParam || endDateParam)) {
+    return {
+      ok: false,
+      message: "date cannot be combined with start_date/end_date",
+    };
+  }
+
+  const startDate = date || startDateParam || todayText;
+  const endDate = date || endDateParam || startDate;
+  const startAt = startOfLocalDate(startDate);
+  const endDayStart = startOfLocalDate(endDate);
+  if (!startAt || !endDayStart) {
+    return { ok: false, message: "date must use YYYY-MM-DD format" };
+  }
+
+  const endAt = addLocalDays(endDayStart, 1);
+  if (startAt > endDayStart) {
+    return { ok: false, message: "start_date must be before end_date" };
+  }
+  if (startAt < earliest || endDayStart > today) {
+    return { ok: false, message: "date range must be within the last 7 days" };
+  }
+  if (endAt.getTime() - startAt.getTime() > STATS_QUERY_MAX_DAYS * 86_400_000) {
+    return { ok: false, message: "date range cannot exceed 7 days" };
+  }
+
+  return {
+    ok: true,
+    range: {
+      startAt,
+      endAt,
+      startDate: formatLocalDate(startAt),
+      endDate: formatLocalDate(endDayStart),
+    },
+  };
+}
+
 function bumpFixedWindowCounter(
   counters: Map<string, { count: number; resetAt: number }>,
   key: string,
@@ -48,7 +145,7 @@ export function createServer(
   traceRecorder?: TraceRecorder,
   sendMail?: (
     subject: string,
-    body: string,
+    body: { text: string; html?: string },
     recipients: string[],
   ) => Promise<void>,
 ): express.Application {
@@ -425,9 +522,9 @@ export function createServer(
   //   byClient — keyed by API key name
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
-  app.get(ROUTES.adminStats.path, (_req, res) => {
+  app.get(ROUTES.adminStats.path, (req, res) => {
+    const locale = req.query.locale;
     if (!statsRecorder) {
-      const locale = _req.query.locale;
       if (locale === "zh-CN") {
         res.json({ 已启用: false });
         return;
@@ -435,16 +532,32 @@ export function createServer(
       res.json({ enabled: false });
       return;
     }
+    const rangeResult = resolveStatsDateRange(req.query);
+    if (!rangeResult.ok) {
+      res.status(400).json({ error: { message: rangeResult.message } });
+      return;
+    }
     const generatedAt = new Date().toISOString();
-    const locale = _req.query.locale;
+    const snapshot = statsRecorder.getSnapshotForRange(
+      rangeResult.range.startAt,
+      rangeResult.range.endAt,
+    );
     if (locale === "zh-CN") {
       res.json({
-        ...presentStatsSnapshot(statsRecorder.getSnapshot(), generatedAt),
+        ...presentStatsSnapshot(snapshot, generatedAt),
+        查询范围: {
+          开始日期: rangeResult.range.startDate,
+          结束日期: rangeResult.range.endDate,
+        },
       });
       return;
     }
     res.json({
-      ...statsRecorder.getSnapshot(),
+      ...snapshot,
+      range: {
+        start_date: rangeResult.range.startDate,
+        end_date: rangeResult.range.endDate,
+      },
       generated_at: generatedAt,
     });
   });
@@ -504,6 +617,65 @@ export function createServer(
 
     res.json({
       refreshed,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  app.get(ROUTES.adminAccountsDecision.path, (req, res) => {
+    const explicitProvider = req.query.provider;
+    const model = typeof req.query.model === "string" ? req.query.model : null;
+    const sessionKey =
+      typeof req.query.sessionKey === "string"
+        ? req.query.sessionKey
+        : undefined;
+    const path =
+      typeof req.query.path === "string" ? req.query.path : undefined;
+    const apiKeyTier =
+      req.query.apiKeyTier === "lite" ||
+      req.query.apiKeyTier === "pro" ||
+      req.query.apiKeyTier === "admin"
+        ? req.query.apiKeyTier
+        : undefined;
+
+    let providerId: "anthropic" | "codex" | "cursor";
+    let providerRoute:
+      | {
+          model: string;
+          resolvedModel: string;
+          provider: string;
+          reason: string;
+          cacheHit: boolean;
+        }
+      | undefined;
+
+    if (
+      explicitProvider === "anthropic" ||
+      explicitProvider === "codex" ||
+      explicitProvider === "cursor"
+    ) {
+      providerId = explicitProvider;
+    } else if (model) {
+      const routed = registry.forModelWithDecision(model);
+      providerId = routed.provider.id;
+      providerRoute = routed.decision;
+    } else {
+      res.status(400).json({
+        error: { message: "provider or model is required" },
+      });
+      return;
+    }
+
+    const provider = registry.get(providerId);
+    const inspection = provider.manager.inspectNextAccount({
+      sessionKey,
+      model: model || undefined,
+      path,
+      apiKeyTier,
+    });
+    res.json({
+      provider: providerId,
+      provider_route: providerRoute,
+      inspection,
       generated_at: new Date().toISOString(),
     });
   });
@@ -642,9 +814,10 @@ export function createServer(
       traceRecorder.prune();
       res.json({
         date: result.date,
-        filePath: result.filePath,
+        summary: result.summary,
+        htmlFilePath: result.htmlFilePath,
         emailed: result.emailed,
-        markdown: result.markdown,
+        html: result.html,
       });
     } catch (err: any) {
       res.status(400).json({ error: { message: err?.message || String(err) } });

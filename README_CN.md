@@ -384,7 +384,7 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 每一个通过 API key 鉴权的 `/v1` 请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。`/admin` 管理接口不计入统计。
 
-`GET /admin/stats` 返回三个互相独立的聚合视图：
+`GET /admin/stats` 返回三个互相独立的聚合视图，默认返回当天统计。可用 `date=YYYY-MM-DD` 查询单日，也可用 `start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` 查询日期区间，最长只能查询最近 7 天。
 
 - `byClient[name]` —— 按 API key 的 `name` 聚合：请求数、成功/失败、五项 token、累计延迟、最近一次 IP 与 User-Agent
 - `byAccount["<provider>:<email>"]` —— 按上游 OAuth 账号聚合
@@ -393,6 +393,9 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 ```bash
 curl http://127.0.0.1:8317/admin/stats \
+  -H "Authorization: Bearer <your-api-key>"
+
+curl "http://127.0.0.1:8317/admin/stats?start_date=2026-05-03&end_date=2026-05-09" \
   -H "Authorization: Bearer <your-api-key>"
 ```
 
@@ -416,6 +419,7 @@ curl http://127.0.0.1:8317/admin/stats \
     "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
   },
   "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
+  "range": { "start_date": "2026-05-09", "end_date": "2026-05-09" },
   "generated_at": "2026-05-09T12:00:00Z"
 }
 ```

@@ -65,6 +65,9 @@ export interface StatsSnapshot {
   totals: BaseBucket;
 }
 
+/** 统计查询仅支持最近 7 天，内存中也只保留这个窗口内的原始事件。 */
+const RECENT_STATS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 function emptyBucket(now: string): BaseBucket {
   return {
     requests: 0,
@@ -103,6 +106,89 @@ function shouldRecordStatsEvent(ev: Pick<StatsEvent, "endpoint">): boolean {
   return !/^[A-Z]+ \/admin(?:\/|$)/.test(ev.endpoint);
 }
 
+/** 用 Map 表示的可变统计快照，便于复用同一套聚合逻辑。 */
+interface MutableStatsSnapshot {
+  byClient: Map<string, ClientBucket>;
+  byAccount: Map<string, AccountBucket>;
+  byApi: Map<string, ApiBucket>;
+  totals: BaseBucket;
+}
+
+/** 创建一份空的可变统计快照。 */
+function emptyMutableSnapshot(now: string): MutableStatsSnapshot {
+  return {
+    byClient: new Map<string, ClientBucket>(),
+    byAccount: new Map<string, AccountBucket>(),
+    byApi: new Map<string, ApiBucket>(),
+    totals: emptyBucket(now),
+  };
+}
+
+/** 将内部 Map 结构转换成接口返回的普通对象结构。 */
+function snapshotFromMutable(input: MutableStatsSnapshot): StatsSnapshot {
+  return {
+    byClient: Object.fromEntries(input.byClient),
+    byAccount: Object.fromEntries(input.byAccount),
+    byApi: Object.fromEntries(input.byApi),
+    totals: { ...input.totals },
+  };
+}
+
+/** 将单条统计事件累加到目标快照的三个维度和总计中。 */
+function applyEventToSnapshot(
+  target: MutableStatsSnapshot,
+  apiKeyNamesByHash: Map<string, string>,
+  ev: StatsEvent,
+): void {
+  applyBaseDelta(target.totals, ev);
+
+  const clientKey = ev.apiKeyName || apiKeyNamesByHash.get(ev.apiKeyHash);
+  if (clientKey) {
+    let cb = target.byClient.get(clientKey);
+    if (!cb) {
+      cb = {
+        ...emptyBucket(ev.ts),
+        name: clientKey,
+        lastIp: ev.ip,
+        lastUa: ev.ua,
+      };
+      target.byClient.set(clientKey, cb);
+    }
+    cb.lastIp = ev.ip || cb.lastIp;
+    cb.lastUa = ev.ua || cb.lastUa;
+    applyBaseDelta(cb, ev);
+  }
+
+  if (ev.provider && ev.accountEmail) {
+    const accKey = `${ev.provider}:${ev.accountEmail}`;
+    let ab = target.byAccount.get(accKey);
+    if (!ab) {
+      ab = {
+        ...emptyBucket(ev.ts),
+        provider: ev.provider,
+        email: ev.accountEmail,
+      };
+      target.byAccount.set(accKey, ab);
+    }
+    applyBaseDelta(ab, ev);
+  }
+
+  const apiModel = ev.model || "unknown";
+  const apiProvider = ev.provider || null;
+  const apiKey = `${ev.endpoint}|${apiModel}|${apiProvider ?? "unknown"}`;
+  let pb = target.byApi.get(apiKey);
+  if (!pb) {
+    pb = {
+      ...emptyBucket(ev.ts),
+      endpoint: ev.endpoint,
+      model: apiModel,
+      provider: apiProvider,
+    };
+    target.byApi.set(apiKey, pb);
+  }
+  applyBaseDelta(pb, ev);
+}
+
 /**
  * Three independent aggregate views — keyed by client (API key name),
  * upstream account (provider + email), and API surface (endpoint + model
@@ -115,6 +201,8 @@ export class StatsRecorder {
   private byAccount = new Map<string, AccountBucket>();
   private byApi = new Map<string, ApiBucket>();
   private totals: BaseBucket = emptyBucket(new Date().toISOString());
+  /** 最近 7 天内的原始事件，用于按日期窗口重新聚合。 */
+  private recentEvents: StatsEvent[] = [];
   private apiKeyNamesByHash = new Map<string, string>();
 
   private appender: StatsAppender | null = null;
@@ -190,65 +278,57 @@ export class StatsRecorder {
     };
   }
 
+  /** 基于最近事件缓存生成指定半开时间区间内的统计快照。 */
+  getSnapshotForRange(startAt: Date, endAt: Date): StatsSnapshot {
+    const target = emptyMutableSnapshot(new Date().toISOString());
+    const startMs = startAt.getTime();
+    const endMs = endAt.getTime();
+    for (const ev of this.recentEvents) {
+      const eventMs = Date.parse(ev.ts);
+      if (eventMs >= startMs && eventMs < endMs) {
+        applyEventToSnapshot(target, this.apiKeyNamesByHash, ev);
+      }
+    }
+    return snapshotFromMutable(target);
+  }
+
   /** Reset all in-memory aggregates. Doesn't touch the JSONL on disk. */
   reset(): void {
     this.byClient.clear();
     this.byAccount.clear();
     this.byApi.clear();
+    this.recentEvents = [];
     this.totals = emptyBucket(new Date().toISOString());
   }
 
   /** Test/replay-only entry point — does NOT touch the disk. */
   applyEvent(ev: StatsEvent): void {
     if (!shouldRecordStatsEvent(ev)) return;
-    applyBaseDelta(this.totals, ev);
+    applyEventToSnapshot(
+      {
+        byClient: this.byClient,
+        byAccount: this.byAccount,
+        byApi: this.byApi,
+        totals: this.totals,
+      },
+      this.apiKeyNamesByHash,
+      ev,
+    );
+    this.rememberRecentEvent(ev);
+  }
 
-    const clientKey =
-      ev.apiKeyName || this.apiKeyNamesByHash.get(ev.apiKeyHash);
-    if (clientKey) {
-      let cb = this.byClient.get(clientKey);
-      if (!cb) {
-        cb = {
-          ...emptyBucket(ev.ts),
-          name: clientKey,
-          lastIp: ev.ip,
-          lastUa: ev.ua,
-        };
-        this.byClient.set(clientKey, cb);
-      }
-      cb.lastIp = ev.ip || cb.lastIp;
-      cb.lastUa = ev.ua || cb.lastUa;
-      applyBaseDelta(cb, ev);
+  /** 记录一条可被日期查询命中的最近事件，并清理过期缓存。 */
+  private rememberRecentEvent(ev: StatsEvent): void {
+    const eventMs = Date.parse(ev.ts);
+    if (Number.isNaN(eventMs)) return;
+    const cutoffMs = Date.now() - RECENT_STATS_WINDOW_MS;
+    if (eventMs < cutoffMs) return;
+    this.recentEvents.push(ev);
+    while (this.recentEvents.length > 0) {
+      const firstMs = Date.parse(this.recentEvents[0].ts);
+      if (!Number.isNaN(firstMs) && firstMs >= cutoffMs) break;
+      this.recentEvents.shift();
     }
-
-    if (ev.provider && ev.accountEmail) {
-      const accKey = `${ev.provider}:${ev.accountEmail}`;
-      let ab = this.byAccount.get(accKey);
-      if (!ab) {
-        ab = {
-          ...emptyBucket(ev.ts),
-          provider: ev.provider,
-          email: ev.accountEmail,
-        };
-        this.byAccount.set(accKey, ab);
-      }
-      applyBaseDelta(ab, ev);
-    }
-
-    const apiModel = ev.model || "unknown";
-    const apiProvider = ev.provider || null;
-    const apiKey = `${ev.endpoint}|${apiModel}|${apiProvider ?? "unknown"}`;
-    let pb = this.byApi.get(apiKey);
-    if (!pb) {
-      pb = {
-        ...emptyBucket(ev.ts),
-        endpoint: ev.endpoint,
-        model: apiModel,
-        provider: apiProvider,
-      };
-      this.byApi.set(apiKey, pb);
-    }
-    applyBaseDelta(pb, ev);
   }
 }
 

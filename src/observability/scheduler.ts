@@ -8,7 +8,7 @@ export class DailyReportScheduler {
   private recorder: TraceRecorder;
   private sendMail?: (
     subject: string,
-    body: string,
+    body: { text: string; html?: string },
     recipients: string[],
   ) => Promise<void>;
 
@@ -17,7 +17,7 @@ export class DailyReportScheduler {
     recorder: TraceRecorder,
     sendMail?: (
       subject: string,
-      body: string,
+      body: { text: string; html?: string },
       recipients: string[],
     ) => Promise<void>,
   ) {
@@ -62,7 +62,7 @@ export class DailyReportScheduler {
       );
       this.recorder.prune();
       console.log(
-        `[observability] daily report generated for ${date}: ${result.filePath}`,
+        `[observability] daily report generated for ${date}: ${result.htmlFilePath}`,
       );
     } catch (err: any) {
       console.error(

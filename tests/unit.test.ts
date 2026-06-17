@@ -1385,6 +1385,27 @@ function makeApiKeyRegistry(authDir: string): ApiKeyRegistry {
   return registry;
 }
 
+/** 将测试日期格式化为接口接受的 YYYY-MM-DD。 */
+function formatTestDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 基于当前本地日期偏移生成测试日期。 */
+function testDateWithOffset(offsetDays: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  return formatTestDate(date);
+}
+
+/** 将测试日期转换为当天本地中午的 ISO 时间，避免跨时区边界。 */
+function testIsoAtLocalNoon(dateText: string): string {
+  const [year, month, day] = dateText.split("-").map(Number);
+  return new Date(year, month - 1, day, 12, 0, 0, 0).toISOString();
+}
+
 function makeStatsEvent(over: Partial<StatsEvent> = {}): StatsEvent {
   return {
     v: 1,
@@ -1460,6 +1481,33 @@ test("StatsRecorder splits buckets by client / account / api key", () => {
   assert.equal(Object.keys(snapshot.byClient).length, 2);
   assert.equal(Object.keys(snapshot.byAccount).length, 2);
   assert.equal(Object.keys(snapshot.byApi).length, 2);
+});
+
+test("StatsRecorder builds snapshots for a recent date range", () => {
+  const recorder = new StatsRecorder();
+  const today = testDateWithOffset(0);
+  const yesterday = testDateWithOffset(-1);
+  recorder.applyEvent(
+    makeStatsEvent({
+      ts: testIsoAtLocalNoon(today),
+      apiKeyName: "today-client",
+    }),
+  );
+  recorder.applyEvent(
+    makeStatsEvent({
+      ts: testIsoAtLocalNoon(yesterday),
+      apiKeyName: "yesterday-client",
+    }),
+  );
+
+  const [year, month, day] = yesterday.split("-").map(Number);
+  const startAt = new Date(year, month - 1, day);
+  const endAt = new Date(year, month - 1, day + 1);
+  const snapshot = recorder.getSnapshotForRange(startAt, endAt);
+
+  assert.equal(snapshot.totals.requests, 1);
+  assert.equal(snapshot.byClient["yesterday-client"].requests, 1);
+  assert.equal(snapshot.byClient["today-client"], undefined);
 });
 
 test("StatsRecorder skips byAccount when provider/email missing", () => {
@@ -1727,12 +1775,159 @@ test("createServer supports manual account usage refresh", async () => {
   }
 });
 
+test("createServer exposes account decision diagnostics without mutating selection state", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const manager = new AccountManager(tmp, {
+    provider: "codex",
+    refresh: async () => {
+      throw new Error("should not refresh");
+    },
+    routingMode: "codex-smart",
+  });
+  manager.addAccount({
+    accessToken: "at-1",
+    refreshToken: "rt-1",
+    email: "a@example.com",
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    accountUuid: "acct-a",
+    provider: "codex",
+    planType: "plus",
+    routing: { bias: 0.1, level: "lite" },
+  });
+  manager.addAccount({
+    accessToken: "at-2",
+    refreshToken: "rt-2",
+    email: "b@example.com",
+    expiresAt: "2030-01-01T00:00:00.000Z",
+    accountUuid: "acct-b",
+    provider: "codex",
+    planType: "team",
+    routing: { bias: 0.2, level: "pro" },
+  });
+  const seeded = manager.getNextAccount({
+    sessionKey: "session-1",
+    apiKeyTier: "pro",
+  });
+  assert.equal(seeded.account?.token.email, "b@example.com");
+
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {
+      get: () => ({ id: "codex", manager }),
+      forModelWithDecision: (model: string) => ({
+        provider: { id: "codex", manager },
+        decision: {
+          model,
+          resolvedModel: model,
+          provider: "codex",
+          reason: "codex_model_family",
+          cacheHit: false,
+        },
+      }),
+      all: () => [],
+      withAccounts: () => [],
+    } as any,
+    apiKeys,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/accounts/decision?model=gpt-5&sessionKey=session-1&apiKeyTier=pro`,
+      { headers: { Authorization: "Bearer sk-test" } },
+    );
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(body.provider, "codex");
+    assert.equal(body.provider_route.reason, "codex_model_family");
+    assert.equal(body.inspection.result.selectedAccountEmail, "b@example.com");
+    assert.equal(body.inspection.result.decision.reason, "session_binding");
+    const selected = body.inspection.accounts.find(
+      (item: any) => item.email === "b@example.com",
+    );
+    assert.equal(selected.selected, true);
+    assert.equal(selected.sessionBinding.matched, true);
+    assert.match(selected.reasons.join(","), /selected:session_binding/);
+
+    const after = manager.getNextAccount({
+      sessionKey: "session-2",
+      apiKeyTier: "pro",
+    });
+    assert.equal(after.account?.token.email, "b@example.com");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer account decision requires provider or model", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {
+      all: () => [],
+      withAccounts: () => [],
+    } as any,
+    apiKeys,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/accounts/decision`,
+      { headers: { Authorization: "Bearer sk-test" } },
+    );
+    assert.equal(resp.status, 400);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("createServer admin stats returns chinese fields and formatted values", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const today = testDateWithOffset(0);
   recorder.applyEvent(
     makeStatsEvent({
+      ts: testIsoAtLocalNoon(today),
       apiKeyName: "client-a",
       provider: "codex",
       accountEmail: "a@example.com",
@@ -1775,12 +1970,13 @@ test("createServer admin stats returns chinese fields and formatted values", asy
     const resp = await fetch(
       `http://127.0.0.1:${port}/admin/stats?locale=zh-CN`,
       {
-      headers: { Authorization: "Bearer sk-test" },
+        headers: { Authorization: "Bearer sk-test" },
       },
     );
     assert.equal(resp.status, 200);
     const body = await resp.json();
     assert.equal(body.byClient, undefined);
+    assert.equal(body.查询范围.开始日期, today);
     assert.equal(body.按客户端["client-a"].输入Token, "12.3k");
     assert.equal(body.按客户端["client-a"].输出Token, "2.3m");
     assert.equal(body.按客户端["client-a"].缓存命中输入Token, "987");
@@ -1800,8 +1996,10 @@ test("createServer admin stats keeps english schema by default", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const today = testDateWithOffset(0);
   recorder.applyEvent(
     makeStatsEvent({
+      ts: testIsoAtLocalNoon(today),
       apiKeyName: "client-a",
     }),
   );
@@ -1838,8 +2036,117 @@ test("createServer admin stats keeps english schema by default", async () => {
     assert.equal(resp.status, 200);
     const body = await resp.json();
     assert.equal(typeof body.generated_at, "string");
+    assert.equal(body.range.start_date, today);
     assert.equal(body.生成时间, undefined);
     assert.equal(body.byClient["client-a"].name, "client-a");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await recorder.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer admin stats filters by date query", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const recorder = new StatsRecorder();
+  recorder.start(tmp);
+  const today = testDateWithOffset(0);
+  const yesterday = testDateWithOffset(-1);
+  recorder.applyEvent(
+    makeStatsEvent({
+      ts: testIsoAtLocalNoon(today),
+      apiKeyName: "today-client",
+    }),
+  );
+  recorder.applyEvent(
+    makeStatsEvent({
+      ts: testIsoAtLocalNoon(yesterday),
+      apiKeyName: "yesterday-client",
+    }),
+  );
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {} as any,
+    apiKeys,
+    recorder,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/stats?date=${yesterday}`,
+      { headers: { Authorization: "Bearer sk-test" } },
+    );
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(body.range.start_date, yesterday);
+    assert.equal(body.totals.requests, 1);
+    assert.equal(body.byClient["yesterday-client"].requests, 1);
+    assert.equal(body.byClient["today-client"], undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await recorder.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("createServer admin stats rejects dates outside the last week", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+  const recorder = new StatsRecorder();
+  recorder.start(tmp);
+  const apiKeys = makeApiKeyRegistry(tmp);
+  const app = createServer(
+    {
+      host: "",
+      port: 0,
+      "auth-dir": tmp,
+      "api-key-rate-limit": {
+        "window-ms": 5 * 60 * 60 * 1000,
+        "max-requests": 300,
+      },
+      "body-limit": "1mb",
+      cloaking: {},
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+      stats: { enabled: true },
+      debug: "off",
+    } as any,
+    {} as any,
+    apiKeys,
+    recorder,
+  );
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const tooOld = testDateWithOffset(-7);
+    const resp = await fetch(
+      `http://127.0.0.1:${port}/admin/stats?date=${tooOld}`,
+      { headers: { Authorization: "Bearer sk-test" } },
+    );
+    assert.equal(resp.status, 400);
+    const body = await resp.json();
+    assert.match(body.error.message, /last 7 days/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await recorder.stop();
