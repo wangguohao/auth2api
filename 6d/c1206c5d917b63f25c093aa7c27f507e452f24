@@ -1,0 +1,19 @@
+src/utils/account-proxy.ts
+  s_dcac7eed4da2a8::t_6899fd5e52b5e6 10-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "6dc1206c5d917b63f25c093aa7c27f507e452f24",
+  "prompts": {},
+  "sessions": {
+    "s_dcac7eed4da2a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "935116ae-cd00-46fc-b8d8-e3deee3f7cb9",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
