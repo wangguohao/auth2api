@@ -1,0 +1,31 @@
+scripts/install-nginx-domain.sh
+  s_dcac7eed4da2a8::t_26311998919080 117-118
+src/server.ts
+  s_dcac7eed4da2a8::t_f7e7744a44d2da 154-159
+src/auth/codex/oauth.ts
+  s_dcac7eed4da2a8::t_bf014bc0d2f188 4
+  s_dcac7eed4da2a8::t_137dd2414aa50a 117-118
+src/utils/account-proxy.ts
+  s_dcac7eed4da2a8::t_7e58d8cce90d53 1,5-10,12-38,44-47,49-50,83-84,86,92,98
+  s_dcac7eed4da2a8::t_a4ea7341370917 51-55
+  s_dcac7eed4da2a8::t_6dcf94ae214f27 85
+  s_dcac7eed4da2a8::t_322002cc04d8f6 11,39-43,48
+package.json
+  s_dcac7eed4da2a8::t_716ea5e4f1faa3 19-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "22669e0a2df55aedb411305ce50b78dbeb69efc5",
+  "prompts": {},
+  "sessions": {
+    "s_dcac7eed4da2a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "935116ae-cd00-46fc-b8d8-e3deee3f7cb9",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
