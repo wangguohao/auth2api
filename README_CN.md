@@ -22,8 +22,11 @@
 - 提供 OpenAI 兼容接口：`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`
 - 提供 Anthropic 兼容接口：`POST /v1/messages`、`POST /v1/messages/count_tokens`
 - 每个 provider 支持多账号，具备自动选号、故障转移、冷却、刷新和粘性路由
+- 支持账号级路由附加信息，`bias`、`level`、`proxy` 会随 token 一起持久化
 - 按模型族自动路由到对应 provider，而不是把所有请求硬塞到同一个上游
 - 支持 API key 分层、按 key 并发限制、按 key 的 5 小时请求额度
+- 支持定时/手动 usage 刷新、请求 trace、HTML 日报和邮件发送
+- 支持账号级出口代理，以及面向 VPS/nginx 的部署辅助脚本
 - 提供账号快照、路由决策、API key 管理、统计、热重载、日报生成等管理接口
 - 内置请求 trace 与 observability 工具，方便排查慢请求、失败请求和认证异常
 
@@ -119,6 +122,8 @@ node dist/index.js
 
 如果 `bootstrap-admin-key` 为空，首次启动会自动生成并写回 `config.yaml`。
 
+如果前面挂了 nginx，服务端会信任一跳反向代理，并优先从 `X-Forwarded-For` 提取真实客户端 IP，这样内置的 IP 限流不会全部落到 `127.0.0.1`。
+
 ## 路由规则
 
 provider 路由由模型名驱动：
@@ -192,6 +197,14 @@ api-key-tier-limits:
     concurrencyMultiplier: 2
     max-requests-multiplier: 2
 
+api-key-rate-limit:
+  window-ms: 18000000
+  max-requests: 300
+  overrides:
+    sk-special-key:
+      window-ms: 18000000
+      max-requests: 600
+
 body-limit: "200mb"
 
 timeouts:
@@ -240,6 +253,7 @@ cloaking:
 
 - `auth-dir`：token、API key、统计与 trace 的存储目录
 - `api-key-tier-limits`：按 tier 配置并发和额度
+- `api-key-rate-limit`：按客户端 API key 配置请求窗口，支持对单个 key 做精确 override
 - `stats.enabled`：是否记录请求统计并写入 `stats.jsonl`
 - `observability.*`：是否采集 trace、生成 HTML 日报
 - `mail.*`：日报邮件投递配置
@@ -317,6 +331,29 @@ npm run auth:error-trace -- --date YYYY-MM-DD
 - 对慢请求做启发式耗时归因
 - 手动触发日报生成
 - 排查重复出现的登录/刷新失败
+
+## VPS 部署说明
+
+对于全新的 Ubuntu 22.04 x64 VPS，仓库内置了几条辅助脚本：
+
+```bash
+npm run deploy:node20
+npm run deploy:clone-install
+npm run deploy:nginx -- your-domain.example
+npm run deploy:mihomo
+npm run deploy:mihomo-instance -- \
+  --source-yaml /path/to/source.yaml \
+  --proxy-name "日本-TY-4" \
+  --instance-name jp-ty-4 \
+  --port 7890
+```
+
+说明：
+
+- `deploy:nginx` 会把 nginx 反代配置成 HTTP/1.1，避免 SSE 和流式响应被错误降级
+- `deploy:mihomo` 和 `deploy:mihomo-instance` 是可选项，用于需要账号级代理出口时快速落地
+- `deploy:mihomo-instance` 有 4 个必填参数：源 YAML 路径、节点精确名称、实例名、本地监听端口
+- 更完整的代理迁移和运维说明见 [docs/vps-proxy-runbook.md](./docs/vps-proxy-runbook.md)
 
 ## 请求示例
 

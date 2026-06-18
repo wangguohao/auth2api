@@ -31,6 +31,11 @@ import { ApiKeyRegistry } from "../src/auth/api-key-registry";
 import { buildSessionBindingKey } from "../src/routing/session";
 import { parseRoutingExtraArg } from "../src/auth/routing-extra";
 import { createMailSender } from "../src/observability/mail";
+import {
+  getAccountProxyUrl,
+  getCodexDispatcher,
+  getProxyDispatcher,
+} from "../src/utils/account-proxy";
 
 // ══════════════════════════════════════════════════
 // utils/common.ts
@@ -83,6 +88,32 @@ test("parseRoutingExtraArg rejects invalid JSON and legacy fields", () => {
     () => parseRoutingExtraArg('{"proxy":"socks5://127.0.0.1:7890"}'),
     /only supports http:\/\/ or https:\/\//,
   );
+});
+
+test("getAccountProxyUrl extracts normalized proxy from token routing", () => {
+  assert.equal(
+    getAccountProxyUrl({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "alice@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct",
+      provider: "codex",
+      routing: { proxy: "  http://127.0.0.1:7890  " },
+    }),
+    "http://127.0.0.1:7890",
+  );
+});
+
+test("proxy dispatchers are cached per provider profile", () => {
+  const codexA = getProxyDispatcher("codex", "http://127.0.0.1:7890");
+  const codexB = getProxyDispatcher("codex", "http://127.0.0.1:7890");
+  const anthropic = getProxyDispatcher("anthropic", "http://127.0.0.1:7890");
+
+  assert.ok(codexA);
+  assert.equal(codexA, codexB);
+  assert.notEqual(codexA, anthropic);
+  assert.equal(getCodexDispatcher(), getCodexDispatcher());
 });
 
 test("extractApiKey prefers Bearer over x-api-key", () => {

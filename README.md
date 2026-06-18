@@ -21,8 +21,11 @@ The project is intentionally small: one proxy, a few upstream providers, multi-a
 - Exposes OpenAI-compatible endpoints: `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`
 - Exposes Anthropic-compatible endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens`
 - Supports multiple accounts per provider with automatic account selection, failover, cooldown, refresh, and sticky routing
+- Supports per-account routing hints such as `bias`, `level`, and `proxy`, persisted alongside tokens
 - Routes requests by model family instead of forcing one upstream for everything
 - Supports API key tiers, per-key concurrency limits, and per-key 5-hour request quotas
+- Supports scheduled/manual usage refresh, request tracing, daily HTML reports, and email delivery
+- Supports per-account outbound proxy routing plus VPS/nginx deployment helpers
 - Includes admin endpoints for account snapshots, routing inspection, API key management, stats, reload, and daily reports
 - Includes request tracing and observability helpers for debugging slow or failing traffic
 
@@ -108,6 +111,8 @@ Default address:
 
 On first start, a bootstrap admin key is generated automatically and written to `config.yaml` if `bootstrap-admin-key` is empty.
 
+If you run behind nginx, the server trusts one reverse-proxy hop and uses `X-Forwarded-For` for the client IP. This keeps the built-in IP rate limit meaningful instead of collapsing everything to `127.0.0.1`.
+
 ## Routing Rules
 
 Provider routing is model-driven:
@@ -181,6 +186,14 @@ api-key-tier-limits:
     concurrencyMultiplier: 2
     max-requests-multiplier: 2
 
+api-key-rate-limit:
+  window-ms: 18000000
+  max-requests: 300
+  overrides:
+    sk-special-key:
+      window-ms: 18000000
+      max-requests: 600
+
 body-limit: "200mb"
 
 timeouts:
@@ -229,6 +242,7 @@ Important config areas:
 
 - `auth-dir`: token, API key, stats, and observability storage
 - `api-key-tier-limits`: per-tier concurrency and quota limits
+- `api-key-rate-limit`: per-client key request window; supports per-key overrides by exact API key
 - `stats.enabled`: enables request statistics persisted in `stats.jsonl`
 - `observability.*`: enables trace collection and daily HTML reports
 - `mail.*`: used by scheduled or manual daily report delivery
@@ -306,6 +320,29 @@ These scripts help inspect:
 - heuristic latency explanations
 - manual daily report generation
 - repeated auth/refresh failures
+
+## VPS Deployment Notes
+
+For a fresh Ubuntu 22.04 x64 VPS, the repo includes helper scripts:
+
+```bash
+npm run deploy:node20
+npm run deploy:clone-install
+npm run deploy:nginx -- your-domain.example
+npm run deploy:mihomo
+npm run deploy:mihomo-instance -- \
+  --source-yaml /path/to/source.yaml \
+  --proxy-name "Japan-TY-4" \
+  --instance-name jp-ty-4 \
+  --port 7890
+```
+
+Notes:
+
+- `deploy:nginx` configures nginx for HTTP/1.1 proxying so SSE/streaming works correctly
+- `deploy:mihomo` and `deploy:mihomo-instance` are optional helpers for per-account proxy egress setups
+- `deploy:mihomo-instance` requires four mandatory arguments: source YAML path, exact proxy node name, instance name, and local port
+- the fuller proxy migration and operations notes live in [docs/vps-proxy-runbook.md](./docs/vps-proxy-runbook.md)
 
 ## Example Request
 

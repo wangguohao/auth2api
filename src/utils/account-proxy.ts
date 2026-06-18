@@ -1,6 +1,6 @@
 import { Agent, Dispatcher, ProxyAgent } from "undici";
 import { AvailableAccount } from "../accounts/manager";
-import { TokenData } from "../auth/types";
+import { ProviderId, TokenData } from "../auth/types";
 
 /**
  * TLS ClientHello 模拟配置 — 匹配官方 codex-rs CLI（Rust / rustls + ring）。
@@ -42,24 +42,36 @@ const CODEX_TLS_CONNECT_OPTIONS = {
   maxVersion: "TLSv1.3" as const,
 };
 
-/** 全局默认 dispatcher — 直连时使用，TLS 指纹已伪装。 */
-const defaultAgent = new Agent({
+/** Codex 专用直连 dispatcher，仅用于需要 TLS 指纹伪装的 OpenAI/Codex 链路。 */
+const codexDirectAgent = new Agent({
   connect: CODEX_TLS_CONNECT_OPTIONS as any,
 });
 
-/** 导出 defaultAgent 供 OAuth 等无账号上下文的场景使用。 */
-export function getDefaultAgent(): Dispatcher {
-  return defaultAgent;
-}
+/** 非 Codex provider 的默认直连 dispatcher，保持 undici/Node 的原生行为。 */
+const defaultDirectAgent = new Agent();
 
-/** 复用代理 dispatcher，避免每次请求都新建隧道连接池。 */
-const proxyDispatcherCache = new Map<string, Dispatcher>();
+/** Codex 代理 dispatcher 缓存，代理出口后的 TLS 握手仍保持 Codex 指纹伪装。 */
+const codexProxyDispatcherCache = new Map<string, Dispatcher>();
+
+/** 普通代理 dispatcher 缓存，供 Anthropic / Cursor 等 provider 使用。 */
+const defaultProxyDispatcherCache = new Map<string, Dispatcher>();
 
 /** 判断入参是否为 `AvailableAccount`，用于安全读取 `token.routing`。 */
 function isAvailableAccount(
   source: AvailableAccount | TokenData | undefined,
 ): source is AvailableAccount {
   return !!source && "token" in source;
+}
+
+/** 提取请求来源所属 provider；缺省时按历史兼容逻辑视为 anthropic。 */
+function getSourceProvider(
+  source: AvailableAccount | TokenData | undefined,
+): ProviderId {
+  if (!source) return "anthropic";
+  if (isAvailableAccount(source)) {
+    return source.token.provider || source.provider || "anthropic";
+  }
+  return source.provider || "anthropic";
 }
 
 /** 从账号或 token 上提取账号级代理地址。 */
@@ -74,27 +86,50 @@ export function getAccountProxyUrl(
   return normalized.length > 0 ? normalized : undefined;
 }
 
-/** 按代理地址返回可复用的 undici dispatcher。 */
-export function getProxyDispatcher(proxyUrl?: string): Dispatcher | undefined {
+/** 按 provider 和代理地址返回可复用的 dispatcher。 */
+export function getProxyDispatcher(
+  provider: ProviderId,
+  proxyUrl?: string,
+): Dispatcher | undefined {
   if (!proxyUrl) return undefined;
-  let dispatcher = proxyDispatcherCache.get(proxyUrl);
+  const cache =
+    provider === "codex"
+      ? codexProxyDispatcherCache
+      : defaultProxyDispatcherCache;
+  let dispatcher = cache.get(proxyUrl);
   if (!dispatcher) {
-    dispatcher = new ProxyAgent({
-      uri: proxyUrl,
-      connect: CODEX_TLS_CONNECT_OPTIONS as any,
-    });
-    proxyDispatcherCache.set(proxyUrl, dispatcher);
+    dispatcher =
+      provider === "codex"
+        ? new ProxyAgent({
+            uri: proxyUrl,
+            connect: CODEX_TLS_CONNECT_OPTIONS as any,
+          })
+        : new ProxyAgent(proxyUrl);
+    cache.set(proxyUrl, dispatcher);
   }
   return dispatcher;
 }
 
-/** 用账号级代理执行 fetch；未配置代理时回落到伪装过 TLS 的全局 dispatcher。 */
+/** 返回指定 provider 的直连 dispatcher。 */
+function getDirectDispatcher(provider: ProviderId): Dispatcher {
+  return provider === "codex" ? codexDirectAgent : defaultDirectAgent;
+}
+
+/** 导出 Codex 专用 dispatcher，供无账号上下文的 OAuth code exchange 使用。 */
+export function getCodexDispatcher(): Dispatcher {
+  return codexDirectAgent;
+}
+
+/** 用账号级代理执行 fetch；仅 Codex 链路启用 TLS 指纹伪装。 */
 export function fetchWithAccountProxy(
   input: string | URL | Request,
   init: RequestInit,
   source?: AvailableAccount | TokenData,
 ): Promise<Response> {
-  const dispatcher = getProxyDispatcher(getAccountProxyUrl(source)) ?? defaultAgent;
+  const provider = getSourceProvider(source);
+  const dispatcher =
+    getProxyDispatcher(provider, getAccountProxyUrl(source)) ??
+    getDirectDispatcher(provider);
   return fetch(input, {
     ...init,
     dispatcher,
