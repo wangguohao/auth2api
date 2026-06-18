@@ -24,6 +24,8 @@ export interface TokenData {
   planType?: string;
   /** 持久化的账号用量快照，供重启后继续参与路由。 */
   usage?: TokenUsageSnapshot;
+  /** 持久化的账号累计统计，供重启后继续展示。 */
+  stats?: TokenAccountStats;
   /** Cursor only — stable machine id read from Cursor's local storage. */
   cursorServiceMachineId?: string;
   /** Cursor only — client version accepted by Cursor's internal API. */
@@ -68,6 +70,18 @@ export interface TokenUsageSnapshot {
   lastError: string | null;
 }
 
+/** 持久化到 token JSON 的账号累计统计。 */
+export interface TokenAccountStats {
+  totalRequests: number;
+  totalSuccesses: number;
+  totalFailures: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheCreationInputTokens: number;
+  totalCacheReadInputTokens: number;
+  totalReasoningOutputTokens: number;
+}
+
 export interface TokenStorage {
   access_token: string;
   refresh_token: string;
@@ -80,6 +94,7 @@ export interface TokenStorage {
   plan_type?: string;
   routing?: RoutingConfig;
   usage?: TokenUsageSnapshot;
+  stats?: TokenAccountStats;
   cursor_service_machine_id?: string;
   cursor_client_version?: string;
   cursor_config_version?: string;

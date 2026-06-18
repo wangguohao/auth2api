@@ -5,6 +5,7 @@
 补充运维文档：
 
 - [VPS 代理迁移手册](./docs/vps-proxy-runbook.md)
+- 一键脚本位于 `scripts/`
 
 `auth2api` 是一个轻量级 OAuth 转 API 代理，目标很直接：把你自己的上游登录态变成可在本地或自托管环境里调用的 API。
 
@@ -37,11 +38,21 @@
 ## 安装
 
 ```bash
-git clone https://github.com/AmazingAng/auth2api
+git clone https://github.com/wangguohao/auth2api.git
 cd auth2api
 npm install
 npm run build
 ```
+
+如果你是在 Ubuntu 22.04 x64 的新 VPS 上迁移，建议直接按下面顺序跑：
+
+```bash
+sudo bash scripts/install-node20.sh
+sudo bash scripts/clone-auth2api-install.sh
+sudo bash scripts/install-nginx-domain.sh auth2api.wghcloud.com
+```
+
+其中最后一条命令里的域名请替换成你的实际域名。
 
 ## 登录
 

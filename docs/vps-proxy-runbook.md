@@ -32,6 +32,24 @@
 - Anthropic / Codex 的上游请求、refresh、models/usage 拉取已接入账号级代理
 - Cursor 的主聊天链路目前仍是自建 HTTP/2 直连传输，尚未接入账号级代理
 
+## 一键脚本
+
+仓库里已经补了三份迁移脚本，适合 Ubuntu 22.04 x64 的新 VPS：
+
+1. `scripts/install-node20.sh`：安装 Node.js 20 和 npm
+2. `scripts/clone-auth2api-install.sh`：克隆仓库、安装依赖、构建项目
+3. `scripts/install-nginx-domain.sh <domain>`：按域名安装 Nginx 反代配置
+
+推荐顺序：
+
+```bash
+sudo bash scripts/install-node20.sh
+sudo bash scripts/clone-auth2api-install.sh
+sudo bash scripts/install-nginx-domain.sh auth2api.wghcloud.com
+```
+
+如果证书还没签发，`install-nginx-domain.sh` 会只写配置，不会强行 reload nginx。
+
 ## 需要准备的文件
 
 迁移时建议同时备份这几类文件：

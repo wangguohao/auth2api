@@ -174,6 +174,16 @@ test("token-storage round-trips codex tokens with codex-* filename", () => {
       provider: "codex",
       idToken: "id.jwt.token",
       routing: { bias: 1.5 },
+      stats: {
+        totalRequests: 3,
+        totalSuccesses: 2,
+        totalFailures: 1,
+        totalInputTokens: 120,
+        totalOutputTokens: 45,
+        totalCacheCreationInputTokens: 6,
+        totalCacheReadInputTokens: 9,
+        totalReasoningOutputTokens: 4,
+      },
     };
     saveToken(tmpDir, data);
     const files = fs.readdirSync(tmpDir);
@@ -185,6 +195,8 @@ test("token-storage round-trips codex tokens with codex-* filename", () => {
     assert.equal(tokens[0].idToken, "id.jwt.token");
     assert.equal(tokens[0].accountUuid, "chatgpt-acct-1");
     assert.equal(tokens[0].routing?.bias, 1.5);
+    assert.equal(tokens[0].stats?.totalRequests, 3);
+    assert.equal(tokens[0].stats?.totalInputTokens, 120);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -1205,6 +1217,50 @@ test("reload upserts an existing account: replaces accessToken, clears cooldown,
     assert.equal(after.totalSuccesses, 1);
     assert.equal(after.totalRequests, 1);
     assert.equal(after.totalInputTokens, 10);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("AccountManager persists usage stats across restart", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  try {
+    const first = makeCodexManagerWithFakeRefresh(tmpDir);
+    first.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "usage@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct",
+      provider: "codex",
+    });
+    first.recordAttempt("usage@example.com");
+    first.recordSuccess("usage@example.com", {
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheCreationInputTokens: 3,
+      cacheReadInputTokens: 7,
+      reasoningOutputTokens: 2,
+    });
+    first.recordFailure("usage@example.com", "server", "boom");
+
+    const before = first.getSnapshots()[0];
+    assert.equal(before.totalRequests, 1);
+    assert.equal(before.totalSuccesses, 1);
+    assert.equal(before.totalFailures, 1);
+    assert.equal(before.totalInputTokens, 10);
+
+    const second = makeCodexManagerWithFakeRefresh(tmpDir);
+    second.load();
+    const after = second.getSnapshots()[0];
+    assert.equal(after.totalRequests, 1);
+    assert.equal(after.totalSuccesses, 1);
+    assert.equal(after.totalFailures, 1);
+    assert.equal(after.totalInputTokens, 10);
+    assert.equal(after.totalOutputTokens, 20);
+    assert.equal(after.totalCacheCreationInputTokens, 3);
+    assert.equal(after.totalCacheReadInputTokens, 7);
+    assert.equal(after.totalReasoningOutputTokens, 2);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

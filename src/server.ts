@@ -151,6 +151,12 @@ export function createServer(
   ) => Promise<void>,
 ): express.Application {
   const app = express();
+
+  // nginx 反代后需要信任一层代理，Express 才能从 X-Forwarded-For
+  // 中提取真实客户端 IP（而非 127.0.0.1）。值 1 表示信任紧邻的
+  // 一跳（nginx），不信任更外层的 Cloudflare。
+  app.set("trust proxy", 1);
+
   const ipRateLimitMap = new Map<string, { count: number; resetAt: number }>();
   const apiKeyRateLimitMap = new Map<
     string,

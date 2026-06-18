@@ -1,7 +1,7 @@
 import { PKCECodes, TokenData } from "../types";
 import { decodeJwtPayload } from "../../utils/jwt";
 import { timeout } from "../../utils/common";
-import { fetchWithAccountProxy } from "../../utils/account-proxy";
+import { fetchWithAccountProxy, getDefaultAgent } from "../../utils/account-proxy";
 import {
   RefreshTokenExhaustedError,
   detectExhaustedReason,
@@ -114,7 +114,8 @@ export async function exchangeCodexCode(
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
-    });
+      dispatcher: getDefaultAgent(),
+    } as RequestInit & { dispatcher: import("undici").Dispatcher });
   } catch (err: any) {
     // undici's "fetch failed" hides the real cause — surface it.
     const cause = err?.cause;

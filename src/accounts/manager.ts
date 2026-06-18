@@ -3,6 +3,7 @@ import {
   ProviderId,
   RoutingConfig,
   RoutingLevel,
+  TokenAccountStats,
   TokenData,
   TokenUsageSnapshot,
 } from "../auth/types";
@@ -369,6 +370,25 @@ function emptyUsageSnapshot(): AccountUsageSnapshot {
     nextIdleRefreshAt: null,
     lastError: null,
   };
+}
+
+/** 创建一份空的账号累计统计，便于首次启动时初始化。 */
+function emptyAccountStats(): TokenAccountStats {
+  return {
+    totalRequests: 0,
+    totalSuccesses: 0,
+    totalFailures: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheCreationInputTokens: 0,
+    totalCacheReadInputTokens: 0,
+    totalReasoningOutputTokens: 0,
+  };
+}
+
+/** 克隆账号累计统计，避免 token 对象与运行时状态共享引用。 */
+function cloneAccountStats(stats: TokenAccountStats): TokenAccountStats {
+  return { ...stats };
 }
 
 /** 克隆用量快照，避免内存对象与持久化 token 共享引用。 */
@@ -856,6 +876,7 @@ export class AccountManager {
       acct.routing.lastActiveAt = new Date(now).toISOString();
       this.scheduleUsageRefresh(acct, now);
       this.maybeRefreshRoutingMetadata(acct, now, "activity");
+      this.persistAccountStats(acct);
     }
   }
 
@@ -879,6 +900,7 @@ export class AccountManager {
       acct.totalCacheReadInputTokens += usage.cacheReadInputTokens;
       acct.totalReasoningOutputTokens += usage.reasoningOutputTokens;
     }
+    this.persistAccountStats(acct);
   }
 
   recordFailure(
@@ -902,6 +924,7 @@ export class AccountManager {
     );
     acct.cooldownUntil = Date.now() + cooldownMs;
     this.maybeRefreshRoutingMetadata(acct, Date.now(), "failure");
+    this.persistAccountStats(acct);
     console.log(
       `[${this.provider}] account ${email} cooled down for ${Math.round(
         cooldownMs / 1000,
@@ -1633,6 +1656,22 @@ export class AccountManager {
     saveToken(this.authDir, acct.token);
   }
 
+  /** 将账号累计统计写回 token JSON，保证重启后还能恢复管理视图。 */
+  private persistAccountStats(acct: AccountState): void {
+    acct.token.stats = cloneAccountStats({
+      ...emptyAccountStats(),
+      totalRequests: acct.totalRequests,
+      totalSuccesses: acct.totalSuccesses,
+      totalFailures: acct.totalFailures,
+      totalInputTokens: acct.totalInputTokens,
+      totalOutputTokens: acct.totalOutputTokens,
+      totalCacheCreationInputTokens: acct.totalCacheCreationInputTokens,
+      totalCacheReadInputTokens: acct.totalCacheReadInputTokens,
+      totalReasoningOutputTokens: acct.totalReasoningOutputTokens,
+    });
+    saveToken(this.authDir, acct.token);
+  }
+
   private async refreshAll(): Promise<void> {
     if (this.refreshing) return;
     this.refreshing = true;
@@ -1770,6 +1809,7 @@ export class AccountManager {
       totalCacheCreationInputTokens: 0,
       totalCacheReadInputTokens: 0,
       totalReasoningOutputTokens: 0,
+      ...(token.stats || {}),
       refreshPromise: null,
       usage: token.usage ? cloneUsageSnapshot(token.usage) : emptyUsageSnapshot(),
       usageRefreshPromise: null,

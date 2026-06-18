@@ -37,7 +37,7 @@ The project is intentionally small: one proxy, a few upstream providers, multi-a
 ## Install
 
 ```bash
-git clone https://github.com/AmazingAng/auth2api
+git clone https://github.com/wangguohao/auth2api.git
 cd auth2api
 npm install
 npm run build
