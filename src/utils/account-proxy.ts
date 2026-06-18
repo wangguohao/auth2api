@@ -7,8 +7,12 @@ import { TokenData } from "../auth/types";
  *
  * OpenAI / Cloudflare 通过 TLS 指纹（JA3 / JA4）识别客户端类型。
  * Node.js 默认的 OpenSSL 指纹与 Rust/rustls 差异明显，容易被标记为
- * 非官方客户端。以下配置将 cipher suite 顺序、signature algorithm、
- * ALPN 协议对齐到 rustls+ring 的默认值，降低被识别的概率。
+ * 非官方客户端。以下配置将 cipher suite 顺序和 signature algorithm
+ * 对齐到 rustls+ring 的默认值，降低被识别的概率。
+ *
+ * 注意：ALPNProtocols 和 allowH2 已禁用，因为它们在 HTTP CONNECT 代理
+ * （mihomo）隧道中会导致 ECONNRESET — undici 的实验性 H2 支持与代理
+ * 隧道的 TLS 握手不兼容。cipher/sigalgs 调整仍能显著改变 JA3/JA4 指纹。
  */
 const CODEX_TLS_CONNECT_OPTIONS = {
   ciphers: [
@@ -36,11 +40,6 @@ const CODEX_TLS_CONNECT_OPTIONS = {
   ].join(":"),
   minVersion: "TLSv1.2" as const,
   maxVersion: "TLSv1.3" as const,
-  // 官方 codex-rs CLI 通过 ALPN 协商 HTTP/2；Node.js 默认不发 ALPN，
-  // 导致降级为 HTTP/1.1 — 这本身就是一个显著的指纹差异。
-  ALPNProtocols: ["h2", "http/1.1"] as string[],
-  // 启用 HTTP/2 — 官方客户端使用 HTTP/2，不启用会导致协议层指纹不匹配。
-  allowH2: true,
 };
 
 /** 全局默认 dispatcher — 直连时使用，TLS 指纹已伪装。 */
