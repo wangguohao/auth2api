@@ -1,0 +1,23 @@
+tests/unit.test.ts
+  s_dcac7eed4da2a8::t_3113f137759933 34-38,93-116
+src/utils/account-proxy.ts
+  s_dcac7eed4da2a8::t_3113f137759933 3,45-46,50-54,56-57,66-76,89-93,95-99,101-108,113-123,129-132
+src/auth/codex/oauth.ts
+  s_dcac7eed4da2a8::t_3113f137759933 4,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "e76196b85a6393b78f815ee7b5604e25e24ffe07",
+  "prompts": {},
+  "sessions": {
+    "s_dcac7eed4da2a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "935116ae-cd00-46fc-b8d8-e3deee3f7cb9",
+        "model": "mimo-v2.5"
+      },
+      "human_author": "wangguohao <wangguohao_m@qq.com>"
+    }
+  }
+}
